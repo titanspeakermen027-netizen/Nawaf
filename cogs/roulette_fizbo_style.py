@@ -7,7 +7,6 @@ import random
 from dataclasses import dataclass, field
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 from PIL import Image, ImageDraw, ImageFont
 
@@ -34,6 +33,7 @@ class RouletteSession:
     starter_id: int
     players: list[int] = field(default_factory=list)
     active: bool = False
+    cancelled: bool = False
     round_number: int = 0
     board_message: discord.Message | None = None
     decision_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -49,8 +49,8 @@ class RouletteLobbyView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         current = self.game.sessions.get(self.game.key(self.session))
-        if current is not self.session or self.session.active:
-            await interaction.response.send_message("❌ التسجيل سالا، اللعبة بدات.", ephemeral=True)
+        if current is not self.session or self.session.cancelled or self.session.active:
+            await interaction.response.send_message("❌ التسجيل سالا، اللعبة ما بقاتش متاحة.", ephemeral=True)
             return False
         if interaction.user.bot:
             await interaction.response.send_message("❌ البوتات ما كيدخلوش.", ephemeral=True)
@@ -122,6 +122,9 @@ class RouletteDecisionView(discord.ui.View):
         self.add_item(withdraw_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.session.cancelled or self.game.sessions.get(self.game.key(self.session)) is not self.session:
+            await interaction.response.send_message("❌ اللعبة توقفت.", ephemeral=True)
+            return False
         if interaction.user.id != self.selected_id:
             await interaction.response.send_message(
                 "❌ غير اللاعب اللي اختارتو العجلة يقدر يدير القرار.", ephemeral=True
@@ -133,7 +136,7 @@ class RouletteDecisionView(discord.ui.View):
         return True
 
     async def resolve(self, interaction: discord.Interaction, decision: tuple[str, int | None]):
-        if self.resolved:
+        if self.resolved or self.session.cancelled:
             return
         self.resolved = True
         self.session.decision = decision
@@ -194,26 +197,36 @@ class FizboStyleRoulette(commands.Cog):
 
     def build_lobby_text(self, session: RouletteSession, seconds_left: int) -> str:
         guild = self.bot.get_guild(session.guild_id)
-        names = "\n".join(
-            f"{index}. {guild.get_member(uid).mention}"
-            for index, uid in enumerate(session.players, start=1)
-            if guild and guild.get_member(uid)
-        ) or "مازال حتى لاعب."
+        mentions: list[str] = []
+        if guild:
+            for uid in session.players:
+                member = guild.get_member(uid)
+                if member and not member.bot:
+                    mentions.append(f"- {member.mention}")
+        participants = "\n".join(mentions) or "- مازال حتى لاعب."
         return (
             "🎰 **الروليت**\n\n"
-            f"👥 المشاركين: **{len(session.players)}/{MAX_PLAYERS}**\n"
+            f"👥 عدد المشاركين: **{len(session.players)}/{MAX_PLAYERS}**\n"
             f"✅ خاص على الأقل **{MIN_PLAYERS} لاعبين**\n"
             f"⏳ اللعبة غادي تبدا بعد **{seconds_left} ثانية**\n\n"
-            f"{names}\n\n"
+            f"{participants}\n\n"
             "اضغط **دخول إلى اللعبة** باش تشارك، أو **خروج من اللعبة** باش تنسحب قبل البداية."
         )
 
     async def update_lobby(self, session: RouletteSession, seconds_left: int = LOBBY_SECONDS) -> None:
-        if session.board_message:
+        if session.board_message and not session.cancelled:
             try:
                 await session.board_message.edit(content=self.build_lobby_text(session, seconds_left))
             except discord.HTTPException:
                 pass
+
+    async def cancel_session(self, session: RouletteSession) -> None:
+        if session.cancelled:
+            return
+        session.cancelled = True
+        session.decision = None
+        session.decision_event.set()
+        self.sessions.pop(self.key(session), None)
 
     async def start_lobby(self, message: discord.Message) -> None:
         if not message.guild:
@@ -232,51 +245,86 @@ class FizboStyleRoulette(commands.Cog):
             starter_id=message.author.id,
         )
         self.sessions[key] = session
-        session.board_message = await message.channel.send(
-            content=self.build_lobby_text(session, LOBBY_SECONDS),
-            view=RouletteLobbyView(self, session),
-        )
-
         try:
+            session.board_message = await message.channel.send(
+                content=self.build_lobby_text(session, LOBBY_SECONDS),
+                view=RouletteLobbyView(self, session),
+            )
+
             for seconds_left in range(LOBBY_SECONDS - 1, -1, -1):
                 await asyncio.sleep(1)
-                if session.active or self.sessions.get(key) is not session:
+                if session.cancelled or self.sessions.get(key) is not session:
                     return
                 await self.update_lobby(session, seconds_left)
+
+            if session.cancelled or self.sessions.get(key) is not session:
+                return
 
             session.active = True
             if len(session.players) < MIN_PLAYERS:
                 self.sessions.pop(key, None)
-                await message.channel.send(
-                    f"❌ تسالا وقت التسجيل، ولكن ما وصلناش للحد الأدنى ديال **{MIN_PLAYERS} لاعبين**.\n"
-                    "تم إلغاء الروليت."
-                )
+                session.cancelled = True
+                failure = f"❌ الغيت اللعبة عشان ما دخل على الاقل {MIN_PLAYERS} لاعبين"
                 try:
                     await session.board_message.edit(view=None)
                 except discord.HTTPException:
                     pass
+                try:
+                    await session.board_message.reply(failure, mention_author=False)
+                except discord.HTTPException:
+                    await message.channel.send(failure)
                 return
 
             try:
-                await session.board_message.edit(view=None, content="✅ **سال وقت التسجيل — غادي تبدا الروليت دابا.**")
+                await session.board_message.edit(
+                    view=None,
+                    content="✅ **سال وقت التسجيل — غادي تبدا الروليت دابا.**",
+                )
             except discord.HTTPException:
                 pass
             await asyncio.sleep(1.0)
-            await self.run_game(session, message.channel)
+            if not session.cancelled:
+                await self.run_game(session, message.channel)
         except asyncio.CancelledError:
             self.sessions.pop(key, None)
             raise
+        finally:
+            if self.sessions.get(key) is session and (session.cancelled or not session.active):
+                self.sessions.pop(key, None)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        if message.content.strip() == "-روليت":
+        content = message.content.strip()
+        if content == "-روليت":
             await self.start_lobby(message)
+            return
+        if content == "-توقيف":
+            session = self.sessions.get((message.guild.id, message.channel.id))
+            if session is None:
+                return
+            await self.cancel_session(session)
+            await message.channel.send("✅ تم توقيف الروليت الحالية بدون حذف أي رسالة.")
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message: discord.Message):
+        if not message.guild:
+            return
+        session = self.sessions.get((message.guild.id, message.channel.id))
+        if session is None or session.board_message is None:
+            return
+        if message.id != session.board_message.id or session.active or session.cancelled:
+            return
+        await self.cancel_session(session)
+        await message.channel.send("**تم الغاء عشان في حد حذف الرسالة حق اللوبي**")
 
     async def run_game(self, session: RouletteSession, channel: discord.TextChannel) -> None:
         try:
             while len(session.players) > 2:
+                if session.cancelled:
+                    return
+
                 session.round_number += 1
                 selected_id = random.choice(session.players)
                 session.selected_id = selected_id
@@ -284,6 +332,8 @@ class FizboStyleRoulette(commands.Cog):
                 session.decision = None
 
                 wheel_file = await self.make_wheel_file(session, selected_id)
+                if session.cancelled:
+                    return
                 await channel.send(
                     content=f"🎰 **الجولة {session.round_number}** — العجلة اختارت <@{selected_id}>.",
                     file=wheel_file,
@@ -301,13 +351,20 @@ class FizboStyleRoulette(commands.Cog):
                 try:
                     await asyncio.wait_for(session.decision_event.wait(), timeout=DECISION_SECONDS)
                 except asyncio.TimeoutError:
+                    if session.cancelled:
+                        return
                     if selected_id in session.players:
                         session.players.remove(selected_id)
                     await channel.send(content=f"**تم طرد <@{selected_id}> بسبب الخمول**")
                     await self.send_gif(channel)
                     await asyncio.sleep(1.5)
+                    if session.cancelled:
+                        return
                     await channel.send("**سيتم بدأ الجولة التالية بعد قليل.**")
                     continue
+
+                if session.cancelled:
+                    return
 
                 decision = session.decision
                 if not decision:
@@ -336,25 +393,36 @@ class FizboStyleRoulette(commands.Cog):
 
                 await asyncio.sleep(1.5)
 
+            if session.cancelled:
+                return
             if len(session.players) == 2:
                 await self.final_round(session, channel)
             elif len(session.players) == 1:
                 await self.finish_winner(session, channel, session.players[0])
         finally:
             session.active = False
-            self.sessions.pop(self.key(session), None)
+            if self.sessions.get(self.key(session)) is session:
+                self.sessions.pop(self.key(session), None)
 
     async def final_round(self, session: RouletteSession, channel: discord.TextChannel) -> None:
+        if session.cancelled:
+            return
         first, second = session.players
         session.round_number += 1
         selected = random.choice((first, second))
         session.selected_id = selected
         wheel_file = await self.make_wheel_file(session, selected)
+        if session.cancelled:
+            return
         await channel.send(content="🎰 **الجولة النهائية — العجلة كتختار الفائز...**", file=wheel_file)
         await asyncio.sleep(1.25)
+        if session.cancelled:
+            return
         await self.finish_winner(session, channel, selected)
 
     async def finish_winner(self, session: RouletteSession, channel: discord.TextChannel, winner_id: int) -> None:
+        if session.cancelled:
+            return
         self.add_points(session.guild_id, winner_id, WINNER_REWARD)
         await channel.send(
             content=(
