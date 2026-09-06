@@ -40,6 +40,7 @@ COGS = (
     "cogs.admin_prefix",
     "cogs.health",
     "cogs.roulette_lobby_style",
+    "cogs.roulette_controls",
 )
 
 
