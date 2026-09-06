@@ -97,7 +97,10 @@ class AdminPrefix(commands.Cog):
                 continue
         if deleted_ids:
             with connect() as con:
-                con.executemany("DELETE FROM tickets WHERE guild_id=? AND channel_id=?", [(guild.id, cid) for cid in deleted_ids])
+                con.executemany(
+                    "DELETE FROM tickets WHERE guild_id=? AND channel_id=?",
+                    [(guild.id, cid) for cid in deleted_ids],
+                )
         return deleted
 
     async def handle_message(self, message: discord.Message):
@@ -105,7 +108,9 @@ class AdminPrefix(commands.Cog):
             return
         content = message.content.strip()
 
-        if content in {"-نقاطي", "-نقاط"}:
+        # `-نقاطي` is owned by cogs.points so the user receives the image card
+        # exactly once. Keep the older `-نقاط` shortcut available here.
+        if content in {"-نقاط"}:
             value = self.get_points(message.guild.id, message.author.id)
             await self.reply(message, f"⭐ **{message.author.display_name}، عندك حالياً `{value}` نقطة.**")
             return
@@ -138,7 +143,10 @@ class AdminPrefix(commands.Cog):
                 await self.reply(message, "❌ غير الإدارة تقدر تحذف جميع التكتات.")
                 return
             with connect() as con:
-                row = con.execute("SELECT COUNT(*) AS total FROM tickets WHERE guild_id=?", (message.guild.id,)).fetchone()
+                row = con.execute(
+                    "SELECT COUNT(*) AS total FROM tickets WHERE guild_id=?",
+                    (message.guild.id,),
+                ).fetchone()
             total = int(row["total"])
             if total == 0:
                 await self.reply(message, "ℹ️ ما كاين حتى تكت مسجل باش يتحذف.")
