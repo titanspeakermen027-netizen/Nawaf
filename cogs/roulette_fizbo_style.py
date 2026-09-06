@@ -308,16 +308,19 @@ class FizboStyleRoulette(commands.Cog):
             await message.channel.send("✅ تم توقيف الروليت الحالية بدون حذف أي رسالة.")
 
     @commands.Cog.listener()
-    async def on_message_delete(self, message: discord.Message):
-        if not message.guild:
-            return
-        session = self.sessions.get((message.guild.id, message.channel.id))
-        if session is None or session.board_message is None:
-            return
-        if message.id != session.board_message.id or session.active or session.cancelled:
-            return
-        await self.cancel_session(session)
-        await message.channel.send("**تم الغاء عشان في حد حذف الرسالة حق اللوبي**")
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        for session in list(self.sessions.values()):
+            if session.channel_id != payload.channel_id:
+                continue
+            if session.board_message is None or session.board_message.id != payload.message_id:
+                continue
+            if session.active or session.cancelled:
+                continue
+            await self.cancel_session(session)
+            channel = self.bot.get_channel(payload.channel_id)
+            if channel is not None:
+                await channel.send("**تم الغاء عشان في حد حذف الرسالة حق اللوبي**")
+            break
 
     async def run_game(self, session: RouletteSession, channel: discord.TextChannel) -> None:
         try:
