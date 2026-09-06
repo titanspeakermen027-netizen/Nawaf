@@ -1,0 +1,1 @@
+Nawaf features: messaging, tickets with rating/note, leveling, applications, announcements, automatic dhikr, custom currency.
