@@ -10,7 +10,8 @@ from cogs.game_channels import is_group_game_channel_allowed
 
 ROULETTE_IMAGE_URL = (
     "https://cdn.discordapp.com/attachments/1543608188975325268/1544727017243549826/"
-    "a3a22b8922412e080f008b2177c2ba80c5ba947a7c003716e06b184059052e15.png"
+    "a3a22b8922412e080f008b2177c2ba80c5ba947a7c003716e06b184059052e15.png?"
+    "ex=6a9ed4a4&is=6a9d8324&hm=584af97554c288cbffecb3b70e8854f0774613af5e63b3a94c3d1981732a76dc&"
 )
 
 
@@ -25,9 +26,6 @@ class RouletteLobbyStyle(commands.Cog):
         roulette = self.bot.get_cog("RouletteMultiMessage")
         if roulette is None or self._patched:
             return
-
-        original_update_lobby = roulette.update_lobby
-        _ = original_update_lobby  # Kept intentionally: gameplay methods remain untouched.
 
         def lobby_embed(session, guild: discord.Guild) -> discord.Embed:
             expires_at = getattr(session, "lobby_expires_at", int(time.time()) + 30)
@@ -72,8 +70,6 @@ class RouletteLobbyStyle(commands.Cog):
                     "❌ كاينة روليت مفتوحة فهاد الروم.", mention_author=False
                 )
 
-            session = roulette_instance.__class__.__dict__.get("Session")
-            # The actual Session class is available through the module used by the original cog.
             module = __import__(
                 "cogs.roulette_multi_message",
                 fromlist=["Session", "LobbyView"],
