@@ -35,12 +35,9 @@ COGS = (
     "cogs.game_assets",
     "cogs.points",
     "cogs.mini_games",
-    "cogs.roulette_prefix_guard",
     "cogs.help",
     "cogs.admin_prefix",
     "cogs.health",
-    "cogs.roulette_lobby_style",
-    "cogs.roulette_controls",
 )
 
 
@@ -62,18 +59,18 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         bot._commands_synced = True
-        print(f"[OK] Synced {len(synced)} global slash commands")
+        print(f"[OK] تمت مزامنة {len(synced)} من أوامر Slash")
 
         applications = bot.get_cog("Applications")
         if applications:
             await applications.register_persistent_panels()
-            print("[OK] Registered persistent application panels")
+            print("[OK] تم تسجيل لوحات التقديم الدائمة")
     except discord.HTTPException as exc:
-        print(f"[ERROR] Slash command sync failed: {exc!r}")
+        print(f"[ERROR] فشلت مزامنة أوامر Slash: {exc!r}")
         raise
 
-    print(f"Nawaf logged in as {bot.user} ({bot.user.id})")
-    print(f"Connected to {len(bot.guilds)} guild(s)")
+    print(f"تم تسجيل دخول Nawaf باسم {bot.user} ({bot.user.id})")
+    print(f"متصل بـ {len(bot.guilds)} خادمًا")
 
 
 @bot.event
@@ -83,14 +80,18 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-@bot.tree.command(name="ping", description="Check bot latency")
+@bot.tree.command(name="ping", description="التحقق من سرعة استجابة البوت")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 {round(bot.latency * 1000)}ms", ephemeral=True)
+    await interaction.response.send_message(
+        f"🏓 {round(bot.latency * 1000)}ms", ephemeral=True
+    )
 
 
-@bot.tree.command(name="test", description="Test Nawaf slash commands")
+@bot.tree.command(name="test", description="اختبار أوامر Nawaf")
 async def test(interaction: discord.Interaction):
-    await interaction.response.send_message("✅ Slash Commands ديال Nawaf خدامين مزيان!", ephemeral=True)
+    await interaction.response.send_message(
+        "✅ تعمل أوامر Slash الخاصة بـNawaf بشكل صحيح!", ephemeral=True
+    )
 
 
 async def main():
