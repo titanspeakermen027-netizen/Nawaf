@@ -1,4 +1,5 @@
 import contextlib
+import io
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -18,19 +19,63 @@ def is_staff(member: discord.Member) -> bool:
 
 def ensure_ticket_schema():
     with connect() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS ticket_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL, emoji TEXT DEFAULT '🎫', description TEXT DEFAULT '',
+            category_id INTEGER, support_role_id INTEGER, enabled INTEGER DEFAULT 1,
+            UNIQUE(guild_id,name))""")
+        con.execute("""CREATE TABLE IF NOT EXISTS ticket_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL, actor_id INTEGER, event_type TEXT NOT NULL,
+            details TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         cols = {r[1] for r in con.execute("PRAGMA table_info(tickets)")}
         for name, definition in (
             ("claimed_by", "INTEGER"),
             ("claimed_at", "TEXT"),
             ("rating_at", "TEXT"),
+            ("type_id", "INTEGER"),
+            ("close_reason", "TEXT"),
         ):
             if name not in cols:
                 con.execute(f"ALTER TABLE tickets ADD COLUMN {name} {definition}")
 
 
+def log_ticket_event(channel_id, guild_id, actor_id, event_type, details=None):
+    with connect() as con:
+        con.execute("INSERT INTO ticket_events(channel_id,guild_id,actor_id,event_type,details) VALUES(?,?,?,?,?)", (channel_id,guild_id,actor_id,event_type,details))
+
+
 def ticket_embed(title, description, color=discord.Color.blurple()):
     return discord.Embed(title=title, description=description, color=color, timestamp=discord.utils.utcnow())
 
+
+
+class TicketOpenModal(discord.ui.Modal):
+    def __init__(self, cog, type_id):
+        super().__init__(title="فتح تذكرة")
+        self.cog, self.type_id = cog, type_id
+        self.subject = discord.ui.TextInput(label="عنوان الطلب", max_length=100)
+        self.details = discord.ui.TextInput(label="اشرح طلبك", style=discord.TextStyle.paragraph, max_length=1500)
+        self.add_item(self.subject); self.add_item(self.details)
+
+    async def on_submit(self, interaction):
+        await self.cog.create_ticket(interaction, self.type_id, self.subject.value, self.details.value)
+
+
+class TicketTypeSelect(discord.ui.Select):
+    def __init__(self, cog, rows):
+        self.cog = cog
+        opts = [discord.SelectOption(label=r["name"][:100], description=(r["description"] or "فتح تذكرة")[:100], emoji=r["emoji"] or "🎫", value=str(r["id"])) for r in rows[:25]]
+        super().__init__(placeholder="اختر نوع التذكرة...", options=opts, custom_id="nawaf:ticket:type")
+
+    async def callback(self, interaction):
+        await interaction.response.send_modal(TicketOpenModal(self.cog, int(self.values[0])))
+
+
+class TicketTypesPanel(discord.ui.View):
+    def __init__(self, cog, rows):
+        super().__init__(timeout=None)
+        self.add_item(TicketTypeSelect(cog, rows))
 
 class RatingModal(discord.ui.Modal):
     def __init__(self, cog, channel_id: int):
@@ -133,6 +178,31 @@ class Tickets(commands.Cog):
         for row in rows:
             self.bot.add_view(RatingView(self, row["channel_id"]))
 
+
+    def ticket_row(self, channel_id):
+        with connect() as con:
+            return con.execute("SELECT * FROM tickets WHERE channel_id=?", (channel_id,)).fetchone()
+
+    async def create_ticket(self, interaction, type_id, subject, details):
+        guild = interaction.guild
+        with connect() as con:
+            typ = con.execute("SELECT * FROM ticket_types WHERE id=? AND guild_id=? AND enabled=1", (type_id,guild.id)).fetchone()
+            old = con.execute("SELECT channel_id FROM tickets WHERE guild_id=? AND owner_id=? AND closed_by IS NULL", (guild.id,interaction.user.id)).fetchone()
+        if old: return await interaction.response.send_message(f"❌ لديك تذكرة مفتوحة بالفعل: <#{old['channel_id']}>", ephemeral=True)
+        if not typ: return await interaction.response.send_message("❌ هذا النوع غير متاح.", ephemeral=True)
+        cfg=get_config(guild.id); cat_id=typ["category_id"] or cfg["ticket_category"]; category=guild.get_channel(cat_id) if cat_id else None
+        overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),interaction.user:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True,attach_files=True)}
+        role=guild.get_role(typ["support_role_id"]) if typ["support_role_id"] else None
+        if role: overwrites[role]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
+        for r in guild.roles:
+            if r.permissions.administrator or r.permissions.manage_channels: overwrites[r]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
+        channel=await guild.create_text_channel(f"ticket-{interaction.user.name}"[:95],category=category,overwrites=overwrites)
+        with connect() as con: con.execute("INSERT INTO tickets(channel_id,guild_id,owner_id,type_id,created_at) VALUES(?,?,?,?,?)",(channel.id,guild.id,interaction.user.id,type_id,now()))
+        log_ticket_event(channel.id,guild.id,interaction.user.id,"opened",subject)
+        e=ticket_embed(f"{typ['emoji'] or '🎫'} {typ['name']}",f"**العنوان:** {subject}\n\n**التفاصيل:**\n{details}\n\n📌 الحالة: بانتظار استلام أحد أعضاء الدعم")
+        await channel.send(content=role.mention if role else None,embed=e,view=TicketControls(self))
+        await interaction.response.send_message(f"✅ تم فتح تذكرتك: {channel.mention}",ephemeral=True)
+
     async def open_ticket(self, interaction: discord.Interaction):
         guild = interaction.guild
         if not guild:
@@ -230,6 +300,24 @@ class Tickets(commands.Cog):
         if row["claimed_by"]:
             embed.set_footer(text=f"تم منح المسؤول {rating} نقاط تلقائياً حسب تقييم العميل")
         await log.send(embed=embed)
+
+
+    @app_commands.command(name="ticket-type-add", description="إضافة نوع تذكرة")
+    async def type_add(self, interaction, name: str, description: str, emoji: str = "🎫", category: discord.CategoryChannel | None = None, support_role: discord.Role | None = None):
+        if not can_control_bot(interaction.user): return await interaction.response.send_message("❌ للإدارة فقط.",ephemeral=True)
+        with connect() as con:
+            con.execute("INSERT INTO ticket_types(guild_id,name,emoji,description,category_id,support_role_id) VALUES(?,?,?,?,?,?)",(interaction.guild.id,name,emoji,description,category.id if category else None,support_role.id if support_role else None))
+        await interaction.response.send_message("✅ تم إضافة نوع التذكرة.",ephemeral=True)
+
+    @app_commands.command(name="ticket-panel-types", description="إرسال لوحة أنواع التذاكر")
+    async def panel_types(self, interaction, channel: discord.TextChannel):
+        if not can_control_bot(interaction.user): return await interaction.response.send_message("❌ للإدارة فقط.",ephemeral=True)
+        with connect() as con:
+            rows=con.execute("SELECT * FROM ticket_types WHERE guild_id=? AND enabled=1 ORDER BY id",(interaction.guild.id,)).fetchall()
+        if not rows: return await interaction.response.send_message("❌ أضف نوع تذكرة واحداً على الأقل.",ephemeral=True)
+        cfg=get_config(interaction.guild.id)
+        await channel.send(embed=ticket_embed(cfg["ticket_panel_title"] or "🎫 مركز الدعم",cfg["ticket_panel_description"] or "اختر نوع طلبك من القائمة أدناه."),view=TicketTypesPanel(self,rows))
+        await interaction.response.send_message("✅ تم إرسال لوحة الأنواع.",ephemeral=True)
 
     @app_commands.command(name="ticket-panel", description="إرسال لوحة فتح التذاكر")
     async def panel(self, interaction: discord.Interaction, channel: discord.TextChannel):
