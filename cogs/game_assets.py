@@ -47,10 +47,14 @@ class GameAssets(commands.Cog):
         if roulette is None:
             return
 
-        # Keep the original generated wheel as a safe fallback until the
-        # roulette artwork is uploaded to assets/ with the expected filename.
+        # Different roulette implementations do not all expose wheel_file.
+        # Never replace an attribute that the loaded cog does not implement.
+        original_wheel_file = getattr(roulette, "wheel_file", None)
+        if original_wheel_file is None:
+            return
+
         if not hasattr(roulette, "_original_wheel_file"):
-            roulette._original_wheel_file = roulette.wheel_file
+            roulette._original_wheel_file = original_wheel_file
 
         async def roulette_wheel_file(session, selected_id: int, final: bool = False):
             local_path = find_asset(ROULETTE_ART_FILENAME)
