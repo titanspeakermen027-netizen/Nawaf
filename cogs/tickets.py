@@ -1,3 +1,4 @@
+import contextlib
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -191,8 +192,9 @@ class Tickets(commands.Cog):
         rating_view = RatingView(self, interaction.channel_id)
         self.bot.add_view(rating_view)
         await interaction.response.send_message("🔒 تم إغلاق التذكرة.", ephemeral=True)
+        owner_mention = f"<@{row['owner_id']}>"
         await interaction.channel.send(
-            content=f"{interaction.guild.get_member(row['owner_id']).mention if interaction.guild.get_member(row['owner_id']) else f'<@{row['owner_id']}>'}",
+            content=owner_mention,
             embed=ticket_embed("⭐ التقييم إلزامي", "تم إغلاق تذكرتك. يرجى إرسال تقييمك الآن قبل أن يتم حذف التذكرة. هذا التقييم يظهر للإدارة ويُحتسب للمسؤول الذي استلم تذكرتك.", discord.Color.orange()),
             view=rating_view,
         )
@@ -255,5 +257,4 @@ class Tickets(commands.Cog):
 
 
 async def setup(bot):
-    import contextlib
     await bot.add_cog(Tickets(bot))
