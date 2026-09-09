@@ -15,6 +15,7 @@ bot = commands.Bot(command_prefix=("!", "C"), intents=intents, case_insensitive=
 
 COGS = (
     "cogs.permissions",
+    "cogs.access_control",
     "cogs.messages",
     "cogs.tickets",
     "cogs.leveling",
