@@ -17,8 +17,6 @@ DEFAULT_ROULETTE_MAX = 12
 ABSOLUTE_ROULETTE_MAX = 50
 
 SUPPORT_INVITES = (
-    "https://discord.gg/Tmnb2QBs2d",
-    "https://discord.gg/akPKDWSGYZ",
     "https://discord.gg/T7CvRtSJER",
 )
 
@@ -30,15 +28,13 @@ PREMIUM_CONTACTS = (
 
 UPSELL_TEXT = (
     "**يمكنك تغيير الحد الأقصى لعدد اللاعبين، وهذه الميزة حصرية لمشتركي Premium فقط.**\n\n"
-    "للحصول على Premium، ادخل إلى أحد خوادم الدعم التالية:\n"
-    f"• {SUPPORT_INVITES[0]}\n"
-    f"• {SUPPORT_INVITES[1]}\n"
-    f"• {SUPPORT_INVITES[2]}\n\n"
-    "بعد الدخول، افتح تذكرة واذكر أحد المسؤولين التاليين:\n"
+    "للتواصل للحصول على Premium، ادخل إلى السيرفر التالي:\n"
+    f"{SUPPORT_INVITES[0]}\n\n"
+    "افتح تذكرة واذكر أحد الأشخاص التاليين:\n"
     f"<@{PREMIUM_CONTACTS[0]}>\n"
     f"<@{PREMIUM_CONTACTS[1]}>\n"
     f"<@{PREMIUM_CONTACTS[2]}>\n\n"
-    "ادفع بإحدى طرق الدفع المتاحة، وسيتم تفعيل Premium للمدة التي اشتريتها."
+    "ثم ادفع له بإحدى طرق الدفع المتاحة، وسيتم منحك Premium للمدة التي اشتريتها."
 )
 
 DURATION_RE = re.compile(r"^(\d+)(y|mo|w|d|h|m|s)$", re.IGNORECASE)
@@ -134,6 +130,25 @@ def parse_duration(value: str) -> int | None:
 def format_dt(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+def parse_role_permissions(value: str | None) -> discord.Permissions:
+    if not value or value.strip().lower() in {"none", "بدون", "لا شيء", "-"}:
+        return discord.Permissions.none()
+    names = [part.strip().lower().replace(" ", "_") for part in value.split(",") if part.strip()]
+    if len(names) > 10:
+        raise ValueError("لا يمكن تحديد أكثر من 10 صلاحيات.")
+    permissions = discord.Permissions.none()
+    invalid = []
+    for name in names:
+        if name not in discord.Permissions.VALID_FLAGS:
+            invalid.append(name)
+            continue
+        setattr(permissions, name, True)
+    if invalid:
+        raise ValueError("صلاحيات غير صحيحة: " + ", ".join(invalid))
+    return permissions
+
+def role_permission_names(perms: discord.Permissions) -> list[str]:
+    return [name for name, enabled in perms if enabled]
 
 class Premium(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -162,6 +177,43 @@ class Premium(commands.Cog):
         await interaction.response.send_message(
             f"✅ تم تحديد الحد الأقصى للمشاركين على **{maximum} لاعباً**.", ephemeral=True
         )
+
+    @app_commands.command(name="premium-role", description="إنشاء رتبة أو تعديل صلاحيات رتبة موجودة")
+    @app_commands.describe(role_name="اسم الرتبة الجديدة", role="رتبة موجودة لتعديلها", permissions="من 1 إلى 10 صلاحيات مفصولة بفاصلة، أو اتركها فارغة بدون صلاحيات")
+    async def premium_role(self, interaction: discord.Interaction, role_name: str | None = None, role: discord.Role | None = None, permissions: str | None = None):
+        if interaction.guild is None:
+            return await interaction.response.send_message("❌ هذا الأمر متاح داخل السيرفر فقط.", ephemeral=True)
+        if not isinstance(interaction.user, discord.Member) or not can_control_bot(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر مخصص للإدارة المخولة بالتحكم في البوت.", ephemeral=True)
+        if not interaction.guild.me.guild_permissions.manage_roles:
+            return await interaction.response.send_message("❌ البوت يحتاج صلاحية إدارة الرتب.", ephemeral=True)
+        try:
+            perms = parse_role_permissions(permissions)
+        except ValueError as exc:
+            return await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+        target = role
+        if target is None:
+            name = (role_name or "Premium").strip()[:100]
+            if not name:
+                return await interaction.response.send_message("❌ حدد اسم الرتبة الجديدة.", ephemeral=True)
+            target = await interaction.guild.create_role(name=name, permissions=perms, reason=f"Role created by {interaction.user}")
+            action = "إنشاء"
+        else:
+            if target >= interaction.guild.me.top_role:
+                return await interaction.response.send_message("❌ لا يمكن للبوت تعديل هذه الرتبة لأنها أعلى من رتبة البوت أو مساوية لها.", ephemeral=True)
+            await target.edit(permissions=perms, reason=f"Role updated by {interaction.user}")
+            action = "تعديل"
+        enabled = role_permission_names(target.permissions)
+        description = "بدون صلاحيات." if not enabled else "\n".join(f"• {name}" for name in enabled)
+        await interaction.response.send_message(f"✅ تم {action} الرتبة {target.mention} بنجاح.\n\n**الصلاحيات:**\n{description}", ephemeral=True)
+
+    @app_commands.command(name="premium-role-permissions", description="عرض أسماء الصلاحيات المتاحة")
+    async def premium_role_permissions(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not can_control_bot(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر مخصص للإدارة.", ephemeral=True)
+        names = sorted(discord.Permissions.VALID_FLAGS.keys())
+        text = ", ".join(names)
+        await interaction.response.send_message("استخدم أسماء الصلاحيات بالإنجليزية ومفصولة بفاصلة. يمكنك تحديد من 1 إلى 10، أو ترك الحقل فارغاً بدون صلاحيات.\n\n" + text[:3800], ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
