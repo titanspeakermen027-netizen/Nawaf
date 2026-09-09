@@ -9,11 +9,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import connect
+from cogs.access_control import can_control_bot
 
 BOT_OWNER_ID = 1472570059367911587
 MIN_ROULETTE_PLAYERS = 4
-DEFAULT_ROULETTE_MAX = 15
-ABSOLUTE_ROULETTE_MAX = 2000
+DEFAULT_ROULETTE_MAX = 12
+ABSOLUTE_ROULETTE_MAX = 50
 
 SUPPORT_INVITES = (
     "https://discord.gg/Tmnb2QBs2d",
@@ -68,7 +69,7 @@ def ensure_premium_table() -> None:
             """
             CREATE TABLE IF NOT EXISTS roulette_premium_config (
                 guild_id INTEGER PRIMARY KEY,
-                maximum_players INTEGER NOT NULL DEFAULT 15
+                maximum_players INTEGER NOT NULL DEFAULT 12
             )
             """
         )
@@ -81,16 +82,13 @@ def get_premium_expiry(guild_id: int) -> int | None:
             "SELECT expires_at FROM guild_premium WHERE guild_id=?",
             (guild_id,),
         ).fetchone()
-
     if not row:
         return None
-
     expiry = int(row[0])
     if expiry <= int(time.time()):
         with connect() as con:
             con.execute("DELETE FROM guild_premium WHERE guild_id=?", (guild_id,))
         return None
-
     return expiry
 
 
@@ -101,16 +99,13 @@ def is_premium(guild_id: int) -> bool:
 def get_roulette_max(guild_id: int) -> int:
     if not is_premium(guild_id):
         return DEFAULT_ROULETTE_MAX
-
     with connect() as con:
         row = con.execute(
             "SELECT maximum_players FROM roulette_premium_config WHERE guild_id=?",
             (guild_id,),
         ).fetchone()
-
     if not row:
         return DEFAULT_ROULETTE_MAX
-
     return max(MIN_ROULETTE_PLAYERS, min(ABSOLUTE_ROULETTE_MAX, int(row[0])))
 
 
@@ -130,11 +125,9 @@ def parse_duration(value: str) -> int | None:
     match = DURATION_RE.fullmatch(value.strip())
     if not match:
         return None
-
     amount = int(match.group(1))
     if amount <= 0:
         return None
-
     return amount * DURATION_SECONDS[match.group(2).lower()]
 
 
@@ -151,55 +144,38 @@ class Premium(commands.Cog):
         name="maximum-number-players-roullete",
         description="تحديد الحد الأقصى للاعبين في فعالية الروليت لمشتركي Premium",
     )
-    @app_commands.describe(maximum="الحد الأقصى من 4 إلى 2000 لاعب")
+    @app_commands.describe(maximum="الحد الأقصى من 4 إلى 50 لاعباً")
     async def maximum_number_players_roullete(
         self,
         interaction: discord.Interaction,
         maximum: app_commands.Range[int, MIN_ROULETTE_PLAYERS, ABSOLUTE_ROULETTE_MAX],
     ):
         if interaction.guild is None:
-            return await interaction.response.send_message(
-                "❌ هذا الأمر متاح داخل الخوادم فقط.", ephemeral=True
-            )
-
+            return await interaction.response.send_message("❌ هذا الأمر متاح داخل الخوادم فقط.", ephemeral=True)
         if not is_premium(interaction.guild.id):
             return await interaction.response.send_message(UPSELL_TEXT, ephemeral=True)
-
-        if interaction.user.id != interaction.guild.owner_id:
+        if not isinstance(interaction.user, discord.Member) or not can_control_bot(interaction.user):
             return await interaction.response.send_message(
-                "❌ يمكن لمالك الخادم فقط تعديل الحد الأقصى لعدد اللاعبين.",
-                ephemeral=True,
+                "❌ غير مالك السيرفر أو الإدارة أو رتب التحكم تقدر تعدل الحد الأقصى.", ephemeral=True
             )
-
         set_roulette_max(interaction.guild.id, int(maximum))
         await interaction.response.send_message(
-            f"✅ تم تحديد الحد الأقصى لعدد المشاركين في الفعالية على **{maximum} لاعبًا**.",
-            ephemeral=True,
+            f"✅ تم تحديد الحد الأقصى للمشاركين على **{maximum} لاعباً**.", ephemeral=True
         )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
             return
-
         content = message.content.strip()
-        if not content.lower().startswith("prm "):
+        if not content.lower().startswith("prm ") or message.author.id != BOT_OWNER_ID:
             return
-
-        if message.author.id != BOT_OWNER_ID:
-            return
-
         seconds = parse_duration(content[4:].strip())
         if seconds is None:
-            await message.reply(
-                "❌ الصيغة غير صحيحة. استخدم مثلًا: `prm 1mo` أو `prm 1y` أو `prm 2w`.",
-                mention_author=False,
-            )
+            await message.reply("❌ الصيغة غير صحيحة. مثال: `prm 1mo` أو `prm 1y`.", mention_author=False)
             return
-
         now = int(time.time())
         expires = now + seconds
-
         with connect() as con:
             con.execute(
                 """
@@ -212,15 +188,12 @@ class Premium(commands.Cog):
                 """,
                 (message.guild.id, now, expires, BOT_OWNER_ID),
             )
-
         embed = discord.Embed(
             title="💎 تم تفعيل Premium",
             description=(
                 f"تم تفعيل Premium لخادم **{message.guild.name}**.\n\n"
                 f"**تاريخ التفعيل:** {format_dt(now)}\n"
-                f"**تاريخ الانتهاء:** {format_dt(expires)}\n"
-                f"**معرّف صاحب الخادم:** {message.guild.owner_id}\n"
-                f"**معرّف الخادم:** {message.guild.id}"
+                f"**تاريخ الانتهاء:** {format_dt(expires)}"
             ),
             color=discord.Color.gold(),
         )
