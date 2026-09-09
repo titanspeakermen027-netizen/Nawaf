@@ -1,61 +1,34 @@
 from __future__ import annotations
 
+import discord
 from discord.ext import commands
 
+from cogs.access_control import can_manage_events
 from cogs.game_channels import is_group_game_channel_allowed
 
 
 class GameRestrictions(commands.Cog):
-    """Overlay channel restrictions without replacing the existing game systems."""
+    """Shared checks for event permissions and allowed event channels."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._patched = False
-        self.original_games_start = None
-        self.original_roulette_start = None
 
-    def _allowed(self, message) -> bool:
-        if not message.guild:
+    @staticmethod
+    def allowed(message: discord.Message) -> bool:
+        return bool(message.guild and is_group_game_channel_allowed(message.guild.id, message.channel.id))
+
+    @staticmethod
+    def can_start(member: discord.Member) -> bool:
+        return can_manage_events(member)
+
+    async def cog_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ هذا الأمر خاص بالسيرفرات.", ephemeral=True)
             return False
-        return is_group_game_channel_allowed(message.guild.id, message.channel.id)
-
-    async def cog_load(self):
-        self.patch_games()
-        self.patch_roulette()
-
-    def patch_games(self) -> None:
-        games = self.bot.get_cog("Games")
-        if not games or self._patched:
-            return
-
-        original = games.start_session
-        self.original_games_start = original
-
-        def guarded_start_session(guild, channel_id, starter_id, game_type, reward=5, max_players=15):
-            if not is_group_game_channel_allowed(guild.id, channel_id):
-                return None, "❌ هاد الروم ما مسموحش فيه الألعاب الجماعية. استعمل واحد من الرومات المحددة من الإدارة."
-            return original(guild, channel_id, starter_id, game_type, reward, max_players)
-
-        games.start_session = guarded_start_session
-        self._patched = True
-
-    def patch_roulette(self) -> None:
-        roulette = self.bot.get_cog("RouletteUpgrade")
-        if not roulette:
-            return
-
-        original = roulette.start
-        self.original_roulette_start = original
-
-        async def guarded_start(message, args):
-            if not self._allowed(message):
-                return await message.reply(
-                    "❌ هاد الروم ما مسموحش فيه الألعاب الجماعية. استعمل واحد من الرومات المحددة من الإدارة.",
-                    mention_author=False,
-                )
-            return await original(message, args)
-
-        roulette.start = guarded_start
+        if not can_manage_events(interaction.user):
+            await interaction.response.send_message("❌ غير الإدارة أو رئيس الفعاليات يقدر يدير الفعاليات.", ephemeral=True)
+            return False
+        return True
 
 
 async def setup(bot: commands.Bot):
