@@ -133,9 +133,32 @@ class TicketControls(discord.ui.View):
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.close_ticket(interaction)
 
-    @discord.ui.button(label="حذف", style=discord.ButtonStyle.secondary, emoji="🗑️", custom_id="nawaf:ticket:delete")
-    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.delete_ticket(interaction)
+    @discord.ui.button(label="إضافة عضو", style=discord.ButtonStyle.primary, emoji="➕", custom_id="nawaf:ticket:add-member")
+    async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.prompt_member(interaction, True)
+
+    @discord.ui.button(label="المزيد", style=discord.ButtonStyle.secondary, emoji="⚙️", custom_id="nawaf:ticket:more")
+    async def more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("⚙️ أدوات إدارة التذكرة:", view=TicketMoreControls(self.cog), ephemeral=True)
+
+
+class TicketMemberModal(discord.ui.Modal):
+    def __init__(self, cog, add=True):
+        super().__init__(title="إضافة عضو للتذكرة" if add else "إزالة عضو من التذكرة")
+        self.cog, self.add = cog, add
+        self.member_id = discord.ui.TextInput(label="معرف العضو (ID)", max_length=20)
+        self.add_item(self.member_id)
+    async def on_submit(self, interaction):
+        try: member_id=int(self.member_id.value.strip())
+        except ValueError: return await interaction.response.send_message("❌ أدخل معرفاً صحيحاً.", ephemeral=True)
+        await self.cog.change_ticket_member(interaction, member_id, self.add)
+
+class TicketMoreControls(discord.ui.View):
+    def __init__(self,cog): super().__init__(timeout=180); self.cog=cog
+    @discord.ui.button(label="Transcript", style=discord.ButtonStyle.primary, emoji="📜")
+    async def transcript(self,i,b): await self.cog.export_transcript(i)
+    @discord.ui.button(label="حذف", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def delete(self,i,b): await self.cog.delete_ticket(i)
 
 
 class TicketPanel(discord.ui.View):
@@ -269,6 +292,36 @@ class Tickets(commands.Cog):
             view=rating_view,
         )
 
+    async def prompt_member(self, interaction, add):
+        if not is_staff(interaction.user): return await interaction.response.send_message("❌ للإدارة فقط.", ephemeral=True)
+        if not self.ticket_row(interaction.channel_id): return await interaction.response.send_message("❌ هذا الروم ليس تذكرة.", ephemeral=True)
+        await interaction.response.send_modal(TicketMemberModal(self, add))
+
+    async def change_ticket_member(self, interaction, member_id, add):
+        row=self.ticket_row(interaction.channel_id); member=interaction.guild.get_member(member_id)
+        if not row or not member: return await interaction.response.send_message("❌ العضو أو التذكرة غير موجود.", ephemeral=True)
+        if not add and member.id==row["owner_id"]: return await interaction.response.send_message("❌ لا يمكن إزالة صاحب التذكرة.", ephemeral=True)
+        if add:
+            await interaction.channel.set_permissions(member,view_channel=True,send_messages=True,read_message_history=True,attach_files=True); text=f"➕ تمت إضافة {member.mention}."
+        else:
+            await interaction.channel.set_permissions(member,overwrite=None); text=f"➖ تمت إزالة {member.mention}."
+        log_ticket_event(interaction.channel_id,interaction.guild.id,interaction.user.id,"member_added" if add else "member_removed",str(member.id))
+        await interaction.response.send_message(text)
+
+    async def export_transcript(self, interaction):
+        if not self.ticket_row(interaction.channel_id): return await interaction.response.send_message("❌ هذا الروم ليس تذكرة.",ephemeral=True)
+        lines=[f"Transcript | #{interaction.channel.name}",""]
+        async for m in interaction.channel.history(limit=None,oldest_first=True):
+            lines.append(f"[{m.created_at.isoformat()}] {m.author}: {m.clean_content}")
+        await interaction.response.send_message("📜 تم إنشاء Transcript.",file=discord.File(io.BytesIO("\n".join(lines).encode("utf-8")),filename=f"ticket-{interaction.channel_id}.txt"),ephemeral=True)
+
+    async def send_transcript_log(self, channel, row):
+        cfg=get_config(row["guild_id"]); log=channel.guild.get_channel(cfg["ticket_log_channel"]) if cfg["ticket_log_channel"] else None
+        if not log: return
+        lines=[f"Transcript | #{channel.name}",""]
+        async for m in channel.history(limit=None,oldest_first=True): lines.append(f"[{m.created_at.isoformat()}] {m.author}: {m.clean_content}")
+        await log.send(content=f"📜 Transcript للتذكرة #{channel.name}",file=discord.File(io.BytesIO("\n".join(lines).encode("utf-8")),filename=f"ticket-{channel.id}.txt"))
+
     async def delete_ticket(self, interaction: discord.Interaction):
         if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
             return await interaction.response.send_message("❌ الحذف مخصص للإدارة.", ephemeral=True)
@@ -280,6 +333,8 @@ class Tickets(commands.Cog):
             return await interaction.response.send_message("❌ لا يمكن حذف التذكرة قبل أن يرسل صاحبها التقييم الإلزامي.", ephemeral=True)
         if not row["closed_by"]:
             return await interaction.response.send_message("❌ يجب إغلاق التذكرة أولاً.", ephemeral=True)
+        await self.send_transcript_log(interaction.channel, row)
+        log_ticket_event(interaction.channel_id, interaction.guild.id, interaction.user.id, "deleted")
         with connect() as con:
             con.execute("DELETE FROM tickets WHERE channel_id=?", (interaction.channel_id,))
         await interaction.channel.delete(reason=f"Ticket deleted by {interaction.user}")
