@@ -12,7 +12,7 @@ DHIKR = [
 ]
 
 class Dhikr(commands.Cog):
-    def __init__(self,bot): self.bot=bot; self.index=0; self.task.start()
+    def __init__(self,bot): self.bot=bot; self.index=0
     def cog_unload(self): self.task.cancel()
     @tasks.loop(minutes=1)
     async def task(self):
@@ -25,8 +25,10 @@ class Dhikr(commands.Cog):
             if ch:
                 await ch.send(f'🕌 **ذكر اليوم**\n{DHIKR[self.index % len(DHIKR)]}')
                 self.index += 1
-    @task.before_loop
-    async def before(self): await self.bot.wait_until_ready()
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if not self.task.is_running():
+            self.task.start()
 
     @app_commands.command(name='dhikr-settings',description='تفعيل الأذكار وتحديد الروم والفاصل بالدقائق')
     @app_commands.checks.has_permissions(manage_guild=True)
