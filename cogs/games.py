@@ -1,20 +1,22 @@
+from __future__ import annotations
+
 import asyncio
 import random
 from dataclasses import dataclass, field
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from database import connect
+from cogs.access_control import can_manage_events
+from cogs.game_channels import is_group_game_channel_allowed
+from cogs.points import add_category_points
 
 
-GROUP_GAMES = {
-    "roulette": {"name": "الروليت", "min": 2, "max": 15, "reward": 5},
-    "dice_battle": {"name": "معركة النرد", "min": 2, "max": 15, "reward": 5},
-}
-
-ROULETTE_EMOJIS = ("🔴", "⚫", "🔴", "⚫", "🟢")
+MIN_PLAYERS = 2
+DEFAULT_MAX_PLAYERS = 12
+LOBBY_SECONDS = 30
+ROUND_SECONDS = 15
 
 
 @dataclass
@@ -23,567 +25,223 @@ class GameSession:
     channel_id: int
     starter_id: int
     game_type: str
-    reward: int
-    min_players: int
-    max_players: int
+    reward: int = 5
+    max_players: int = DEFAULT_MAX_PLAYERS
     players: list[int] = field(default_factory=list)
-    seat_map: dict[int, int] = field(default_factory=dict)
-    active: bool = False
     message_id: int | None = None
-    round_number: int = 0
+    active: bool = False
+    stop_requested: bool = False
+    task: asyncio.Task | None = None
 
 
-class GameLobbyView(discord.ui.View):
-    def __init__(self, games: "Games", guild_id: int, channel_id: int):
-        super().__init__(timeout=None)
+class DiceLobbyView(discord.ui.View):
+    def __init__(self, games: "Games", key: tuple[int, int]):
+        super().__init__(timeout=LOBBY_SECONDS)
         self.games = games
-        self.key = (guild_id, channel_id)
+        self.key = key
 
-    def _session(self) -> GameSession | None:
+    def session(self) -> GameSession | None:
         return self.games.sessions.get(self.key)
 
-    async def refresh(self, interaction: discord.Interaction, session: GameSession):
-        embed = self.games.build_lobby_embed(session)
-        await interaction.response.edit_message(embed=embed, view=self)
+    async def refresh(self, interaction: discord.Interaction) -> None:
+        session = self.session()
+        if not session:
+            return await interaction.response.send_message("❌ اللعبة انتهت.", ephemeral=True)
+        await interaction.response.edit_message(embed=self.games.lobby_embed(session), view=self)
 
-    @discord.ui.button(label="دخول", style=discord.ButtonStyle.success, emoji="🎮", row=0)
+    @discord.ui.button(label="دخول", style=discord.ButtonStyle.success, emoji="🎮")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        session = self._session()
+        session = self.session()
         if not session or session.active:
-            return await interaction.response.send_message(
-                "❌ اللوبي تسالى وبدات الجولة بالفعل.", ephemeral=True
-            )
+            return await interaction.response.send_message("❌ اللعبة بدات بالفعل.", ephemeral=True)
         if interaction.user.bot:
-            return await interaction.response.send_message("❌ البوتات ما يقدروش يدخلوا.", ephemeral=True)
+            return await interaction.response.send_message("❌ البوتات ما يقدروش يدخلو.", ephemeral=True)
         if interaction.user.id in session.players:
-            return await interaction.response.send_message("⚠️ راك داخل اللعبة أصلاً.", ephemeral=True)
+            return await interaction.response.send_message("❌ أنت أصلا مشارك بالفعالية", ephemeral=True)
         if len(session.players) >= session.max_players:
-            return await interaction.response.send_message(
-                f"❌ اللعبة عامرة — الحد الأقصى **{session.max_players}** لاعب.", ephemeral=True
-            )
-
+            return await interaction.response.send_message(f"❌ اللعبة عامرة. الحد الأقصى **{session.max_players}** لاعب.", ephemeral=True)
         session.players.append(interaction.user.id)
-        self.games.assign_seats(session)
-        await self.refresh(interaction, session)
+        await self.refresh(interaction)
 
-    @discord.ui.button(label="خروج", style=discord.ButtonStyle.danger, emoji="🚪", row=0)
+    @discord.ui.button(label="خروج", style=discord.ButtonStyle.danger, emoji="🚪")
     async def leave(self, interaction: discord.Interaction, button: discord.ui.Button):
-        session = self._session()
+        session = self.session()
         if not session or session.active:
             return await interaction.response.send_message("❌ اللعبة بدات بالفعل.", ephemeral=True)
         if interaction.user.id not in session.players:
-            return await interaction.response.send_message("❌ راك ماشي داخل اللعبة.", ephemeral=True)
+            return await interaction.response.send_message("❌ أنت ماشي مشارك.", ephemeral=True)
         if interaction.user.id == session.starter_id:
-            return await interaction.response.send_message(
-                "❌ مشغل اللعبة ما يقدرش يخرج. استعمل `!انهاء`.", ephemeral=True
-            )
-
+            return await interaction.response.send_message("❌ مشغل الفعالية ما يقدرش يخرج. استعمل `-توقيف`.", ephemeral=True)
         session.players.remove(interaction.user.id)
-        self.games.assign_seats(session)
-        await self.refresh(interaction, session)
+        await self.refresh(interaction)
 
-    @discord.ui.button(label="بدء", style=discord.ButtonStyle.primary, emoji="🎰", row=0)
+    @discord.ui.button(label="بدء", style=discord.ButtonStyle.primary, emoji="🎲")
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        session = self._session()
+        session = self.session()
         if not session:
             return await interaction.response.send_message("❌ اللعبة سالات.", ephemeral=True)
-        if interaction.user.id != session.starter_id and not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(
-                "❌ غير مشغل اللعبة أو الإدارة يقدر يبدأ الروليت.", ephemeral=True
-            )
+        if not can_manage_events(interaction.user):
+            return await interaction.response.send_message("❌ غير الإدارة أو رئيس الفعاليات يقدر يبدأ اللعبة.", ephemeral=True)
+        if len(session.players) < MIN_PLAYERS:
+            return await interaction.response.send_message(f"❌ خاص على الأقل **{MIN_PLAYERS} لاعبين**.", ephemeral=True)
         if session.active:
-            return await interaction.response.send_message("⚠️ الجولة خدامة دابا.", ephemeral=True)
-        if len(session.players) < session.min_players:
-            return await interaction.response.send_message(
-                f"❌ خاص على الأقل **{session.min_players} لاعبين**.", ephemeral=True
-            )
-
+            return await interaction.response.send_message("⚠️ اللعبة خدامة دابا.", ephemeral=True)
+        session.active = True
+        if self.games._is_stale_task(session):
+            return await interaction.response.send_message("❌ تعذر بدء اللعبة، حاول من جديد.", ephemeral=True)
         await interaction.response.defer()
-        await self.games.run_roulette(interaction.channel, session, existing_message=interaction.message)
-
-    @discord.ui.button(label="الحالة", style=discord.ButtonStyle.secondary, emoji="📊", row=0)
-    async def status(self, interaction: discord.Interaction, button: discord.ui.Button):
-        session = self._session()
-        if not session:
-            return await interaction.response.send_message("❌ ما بقاتش لعبة هنا.", ephemeral=True)
-        await interaction.response.send_message(embed=self.games.build_lobby_embed(session), ephemeral=True)
+        session.task = asyncio.create_task(self.games.run_dice(interaction.channel, session, interaction.message))
 
 
 class Games(commands.Cog):
+    """Group games other than roulette. Roulette is owned by RouletteMultiMessage."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.sessions: dict[tuple[int, int], GameSession] = {}
 
-    async def _reply(self, message: discord.Message, content: str, **kwargs):
-        return await message.reply(content, mention_author=False, **kwargs)
+    def _is_stale_task(self, session: GameSession) -> bool:
+        return session.task is not None and not session.task.done()
 
-    def add_points(self, guild_id: int, user_id: int, amount: int):
-        with connect() as con:
-            con.execute(
-                "INSERT OR IGNORE INTO points(guild_id,user_id,points) VALUES(?,?,0)",
-                (guild_id, user_id),
-            )
-            con.execute(
-                "UPDATE points SET points=points+? WHERE guild_id=? AND user_id=?",
-                (amount, guild_id, user_id),
-            )
+    def add_points(self, guild_id: int, user_id: int, amount: int) -> None:
+        add_category_points(guild_id, user_id, amount, "group")
 
-    def assign_seats(self, session: GameSession):
-        """Assign stable-looking roulette seats, reshuffling only when the lobby changes."""
-        seats = list(range(1, len(session.players) + 1))
-        session.seat_map = dict(zip(session.players, seats))
-
-    def player_lines(self, session: GameSession) -> str:
-        if not session.players:
-            return "—"
+    def player_lines(self, session: GameSession, page: int = 0, per_page: int = 8) -> tuple[str, int]:
+        players = session.players
+        pages = max(1, (len(players) + per_page - 1) // per_page)
+        page = max(0, min(page, pages - 1))
+        start = page * per_page
+        chunk = players[start:start + per_page]
+        if not chunk:
+            return "—", pages
         lines = []
-        for user_id in session.players:
-            seat = session.seat_map.get(user_id, "?")
-            lines.append(f"**{seat:02d}** ・ <@{user_id}>")
-        return "\n".join(lines)
+        for idx, user_id in enumerate(chunk, start=start + 1):
+            member = None
+            guild = self.bot.get_guild(session.guild_id)
+            if guild:
+                member = guild.get_member(user_id)
+            name = member.display_name if member else f"عضو {user_id}"
+            lines.append(f"**{idx}.** {name} • <@{user_id}>")
+        return "\n".join(lines), pages
 
-    def build_lobby_embed(self, session: GameSession) -> discord.Embed:
-        spec = GROUP_GAMES[session.game_type]
-        if session.game_type == "roulette":
-            title = "🎰 الروليت — Survival Roulette"
-            description = (
-                "كل لاعب عندو خانة. منين كيبدا الدور، كتدور الروليت وكيتم إقصاء لاعب واحد كل جولة. "
-                "آخر لاعب باقي هو الفائز."
-            )
-        else:
-            title = "🎲 معركة النرد"
-            description = "جميع اللاعبين كيرميو النرد، وأعلى نتيجة كتفوز بالجولة."
-
-        color = discord.Color.red() if session.game_type == "roulette" else discord.Color.blurple()
-        embed = discord.Embed(title=title, description=description, color=color)
-        embed.add_field(
-            name="👥 اللاعبين",
-            value=f"**{len(session.players)} / {session.max_players}**",
-            inline=True,
+    def lobby_embed(self, session: GameSession, page: int = 0, remaining: int | None = None) -> discord.Embed:
+        lines, pages = self.player_lines(session, page)
+        timer = remaining if remaining is not None else LOBBY_SECONDS
+        embed = discord.Embed(
+            title="🎲 معركة النرد",
+            description="ادخل عبر الزر. من بعد البداية كل لاعب كيرمي النرد، وصاحب أعلى نتيجة كيربح.",
+            color=discord.Color.blurple(),
         )
-        embed.add_field(name="📌 الحد الأدنى", value=f"**{session.min_players}**", inline=True)
+        embed.add_field(name="👥 المشاركون", value=f"**{len(session.players)} / {session.max_players}**", inline=True)
+        embed.add_field(name="⏳ الوقت", value=f"**{max(0, timer)} ثانية**", inline=True)
         embed.add_field(name="⭐ الجائزة", value=f"**{session.reward} نقطة**", inline=True)
-        embed.add_field(name="🎟️ الخانات", value=self.player_lines(session), inline=False)
-        embed.set_footer(text="دخول وخروج بالأزرار • البدء لمشغل اللعبة أو الإدارة فقط")
+        embed.add_field(name="📋 الأسماء", value=lines, inline=False)
+        embed.set_footer(text=f"صفحة {page + 1}/{pages} • الحد الأدنى لاعبين")
         return embed
 
-    def start_session(
-        self,
-        guild: discord.Guild,
-        channel_id: int,
-        starter_id: int,
-        game_type: str,
-        reward: int = 5,
-        max_players: int = 15,
-    ):
-        key = (guild.id, channel_id)
+    async def start_lobby(self, message: discord.Message, game_type: str = "dice") -> None:
+        if not isinstance(message.author, discord.Member) or not can_manage_events(message.author):
+            await message.reply("❌ غير الإدارة أو رئيس الفعاليات يقدر يسوي الفعاليات.", mention_author=False)
+            return
+        if not is_group_game_channel_allowed(message.guild.id, message.channel.id):
+            await message.reply("❌ هاد الروم ما مسموحش فيه الفعاليات. استعمل روم محدد من الإدارة.", mention_author=False)
+            return
+        key = (message.guild.id, message.channel.id)
         if key in self.sessions:
-            return None, "❌ كاينة لعبة جماعية مفتوحة فهاد الروم."
+            await message.reply("❌ كاينة فعالية مفتوحة فهاد الروم.", mention_author=False)
+            return
 
-        spec = GROUP_GAMES[game_type]
-        maximum = max(spec["min"], min(max_players, spec["max"], 15))
-        safe_reward = max(0, min(reward, 1000))
         session = GameSession(
-            guild_id=guild.id,
-            channel_id=channel_id,
-            starter_id=starter_id,
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            starter_id=message.author.id,
             game_type=game_type,
-            reward=safe_reward,
-            min_players=spec["min"],
-            max_players=maximum,
-            players=[starter_id],
+            reward=5,
+            max_players=DEFAULT_MAX_PLAYERS,
+            players=[message.author.id],
         )
-        self.assign_seats(session)
         self.sessions[key] = session
-        return session, None
-
-    async def send_lobby(self, channel: discord.abc.Messageable, session: GameSession):
-        view = GameLobbyView(self, session.guild_id, session.channel_id)
-        message = await channel.send(embed=self.build_lobby_embed(session), view=view)
-        session.message_id = message.id
-        return message
-
-    async def animate_roulette(
-        self,
-        message: discord.Message,
-        session: GameSession,
-        current_user_id: int | None = None,
-        final: bool = False,
-    ):
-        if final:
-            embed = discord.Embed(
-                title="🎰 الروليت — النتيجة",
-                description="✅ الجولة سالات.",
-                color=discord.Color.green(),
-            )
-            embed.add_field(
-                name="🏆 الفائز",
-                value=f"<@{session.players[0]}>\n⭐ ربح **{session.reward} نقطة**",
-                inline=False,
-            )
-            await message.edit(embed=embed, view=None)
-            return
-
-        target_name = f"<@{current_user_id}>" if current_user_id else "جاري الاختيار..."
-        round_text = max(1, session.round_number)
-        embed = discord.Embed(
-            title="🎰 الروليت كتدور...",
-            description=(
-                f"**الجولة {round_text}**\n\n"
-                f"{random.choice(ROULETTE_EMOJIS)} {random.choice(ROULETTE_EMOJIS)} {random.choice(ROULETTE_EMOJIS)} "
-                f"{random.choice(ROULETTE_EMOJIS)} {random.choice(ROULETTE_EMOJIS)}\n\n"
-                f"🎯 الخانة الحالية: **{target_name}**"
-            ),
-            color=discord.Color.gold(),
-        )
-        embed.set_footer(text=f"{len(session.players)} لاعبين باقيين")
-        await message.edit(embed=embed, view=None)
-
-    async def run_roulette(
-        self,
-        channel: discord.abc.Messageable,
-        session: GameSession,
-        existing_message: discord.Message | None = None,
-    ):
-        if session.active:
-            return
-        session.active = True
-        session.round_number = 0
-        session.players = list(dict.fromkeys(session.players))
-        self.assign_seats(session)
-
-        message = existing_message
-        if message is None:
-            if session.message_id and hasattr(channel, "fetch_message"):
-                try:
-                    message = await channel.fetch_message(session.message_id)
-                except discord.HTTPException:
-                    message = None
-        if message is None:
-            message = await channel.send("🎰 جاري تشغيل الروليت...")
+        view = DiceLobbyView(self, key)
+        lobby = await message.channel.send(embed=self.lobby_embed(session), view=view)
+        session.message_id = lobby.id
 
         try:
-            while len(session.players) > 1:
-                session.round_number += 1
-
-                # Brief rolling animation without spamming the channel.
-                for tick in range(4):
-                    candidate = random.choice(session.players)
-                    await self.animate_roulette(message, session, candidate)
-                    await asyncio.sleep(0.45 + tick * 0.08)
-
-                eliminated = random.choice(session.players)
-                seat = session.seat_map.get(eliminated, "?")
-                session.players.remove(eliminated)
-                self.assign_seats(session)
-
-                result_embed = discord.Embed(
-                    title="🎰 الروليت — إقصاء",
-                    description=(
-                        f"💥 الروليت وقفات على الخانة **{seat:02d}**\n\n"
-                        f"❌ تم إقصاء <@{eliminated}>\n"
-                        f"👥 المتبقون: **{len(session.players)}**"
-                    ),
-                    color=discord.Color.red(),
-                )
-                result_embed.add_field(name="📋 الجولة", value=f"**{session.round_number}**", inline=True)
-                result_embed.add_field(name="🎯 الخانة", value=f"**{seat:02d}**", inline=True)
-                result_embed.set_footer(text="الجولة التالية بعد لحظات...")
-                await message.edit(embed=result_embed, view=None)
-                await asyncio.sleep(1.25)
-
-                if len(session.players) > 1:
-                    await message.edit(embed=self.build_active_embed(session), view=None)
-                    await asyncio.sleep(0.65)
-
-            winner_id = session.players[0]
-            self.add_points(session.guild_id, winner_id, session.reward)
-
-            final_embed = discord.Embed(
-                title="🏆 الروليت — انتهت اللعبة",
-                description="آخر لاعب باقي هو الفائز.",
-                color=discord.Color.green(),
-            )
-            final_embed.add_field(name="🏆 الفائز", value=f"<@{winner_id}>", inline=False)
-            final_embed.add_field(name="⭐ الجائزة", value=f"**{session.reward} نقطة**", inline=True)
-            final_embed.add_field(name="🔄 عدد الجولات", value=f"**{session.round_number}**", inline=True)
-            final_embed.add_field(name="👥 عدد المشاركين", value=f"**{len(session.seat_map)}**", inline=True)
-            final_embed.set_footer(text="يمكن تشغيل لعبة جديدة في نفس الروم")
-            await message.edit(embed=final_embed, view=None)
-        finally:
-            self.sessions.pop((session.guild_id, session.channel_id), None)
-
-    def build_active_embed(self, session: GameSession) -> discord.Embed:
-        embed = discord.Embed(
-            title="🎰 الروليت — اللعبة مستمرة",
-            description="الجولة القادمة غادي تبدأ دابا...",
-            color=discord.Color.orange(),
-        )
-        embed.add_field(name="🔄 الجولة", value=f"**{session.round_number}**", inline=True)
-        embed.add_field(name="👥 المتبقون", value=f"**{len(session.players)}**", inline=True)
-        embed.add_field(name="⭐ جائزة الفائز", value=f"**{session.reward} نقطة**", inline=True)
-        embed.add_field(name="🎟️ اللاعبين", value=self.player_lines(session), inline=False)
-        return embed
-
-    async def finish_dice(self, channel: discord.abc.Messageable, session: GameSession):
-        rolls = {uid: random.randint(1, 6) for uid in session.players}
-        best = max(rolls.values())
-        winners = [uid for uid, value in rolls.items() if value == best]
-        winner_id = random.choice(winners)
-        result = "🎲 " + " | ".join(f"<@{uid}>: **{value}**" for uid, value in rolls.items())
-        if len(winners) > 1:
-            result += f"\n🤝 تعادل، وتم اختيار <@{winner_id}> من المتعادلين."
-        self.add_points(session.guild_id, winner_id, session.reward)
-        self.sessions.pop((session.guild_id, session.channel_id), None)
-        return f"{result}\n\n🏆 الفائز: <@{winner_id}>\n⭐ ربح **{session.reward} نقطة**."
-
-    @app_commands.command(name="game-start", description="تشغيل لعبة جماعية للأعضاء")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.choices(
-        game=[
-            app_commands.Choice(name="الروليت", value="roulette"),
-            app_commands.Choice(name="معركة النرد", value="dice_battle"),
-        ]
-    )
-    async def game_start(
-        self,
-        interaction: discord.Interaction,
-        game: app_commands.Choice[str],
-        reward: app_commands.Range[int, 0, 1000] = 5,
-        max_players: app_commands.Range[int, 2, 15] = 15,
-    ):
-        session, error = self.start_session(
-            interaction.guild,
-            interaction.channel.id,
-            interaction.user.id,
-            game.value,
-            reward,
-            max_players,
-        )
-        if error:
-            return await interaction.response.send_message(error, ephemeral=True)
-        await interaction.response.send_message("🎮 تم إنشاء لوبي اللعبة.")
-        await self.send_lobby(interaction.channel, session)
-
-    @app_commands.command(name="game-join", description="الدخول في اللعبة الجماعية الحالية")
-    async def game_join(self, interaction: discord.Interaction):
-        key = (interaction.guild.id, interaction.channel.id)
-        session = self.sessions.get(key)
-        if not session:
-            return await interaction.response.send_message("❌ ما كايناش لعبة جماعية مفتوحة هنا.", ephemeral=True)
-        if session.active:
-            return await interaction.response.send_message("❌ الجولة بدات، ما يمكنش تدخل دابا.", ephemeral=True)
-        if interaction.user.id in session.players:
-            return await interaction.response.send_message("⚠️ أنت داخل اللعبة أصلاً.", ephemeral=True)
-        if len(session.players) >= session.max_players:
-            return await interaction.response.send_message(
-                f"❌ اللعبة عامرة. الحد الأقصى هو **{session.max_players}** لاعب.", ephemeral=True
-            )
-        session.players.append(interaction.user.id)
-        self.assign_seats(session)
-        await interaction.response.send_message(f"✅ دخل {interaction.user.mention} للعبة. **{len(session.players)}/{session.max_players}**")
-
-    @app_commands.command(name="game-leave", description="الخروج من اللعبة الجماعية الحالية")
-    async def game_leave(self, interaction: discord.Interaction):
-        key = (interaction.guild.id, interaction.channel.id)
-        session = self.sessions.get(key)
-        if not session or session.active or interaction.user.id not in session.players:
-            return await interaction.response.send_message("❌ ما نتايش داخل لوبـي مفتوح هنا.", ephemeral=True)
-        if interaction.user.id == session.starter_id:
-            return await interaction.response.send_message("❌ مشغل اللعبة ما يقدرش يخرج؛ استعمل `/game-end`.", ephemeral=True)
-        session.players.remove(interaction.user.id)
-        self.assign_seats(session)
-        await interaction.response.send_message(f"✅ خرج {interaction.user.mention} من اللعبة.")
-
-    @app_commands.command(name="game-spin", description="بدء الجولة وتحديد الفائز")
-    async def game_spin(self, interaction: discord.Interaction):
-        key = (interaction.guild.id, interaction.channel.id)
-        session = self.sessions.get(key)
-        if not session:
-            return await interaction.response.send_message("❌ ما كايناش لعبة جماعية مفتوحة هنا.", ephemeral=True)
-        if interaction.user.id != session.starter_id and not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message("❌ غير مشغل اللعبة أو الإدارة يقدر يبدأ الجولة.", ephemeral=True)
-        if len(session.players) < session.min_players:
-            return await interaction.response.send_message(
-                f"❌ خاص على الأقل **{session.min_players} لاعبين** باش تبدأ اللعبة.", ephemeral=True
-            )
-        if session.active:
-            return await interaction.response.send_message("⚠️ الجولة خدامة دابا.", ephemeral=True)
-        if session.game_type == "roulette":
-            await interaction.response.defer()
-            await self.run_roulette(interaction.channel, session)
-        else:
-            await interaction.response.send_message(await self.finish_dice(interaction.channel, session))
-
-    @app_commands.command(name="game-end", description="إغلاق اللعبة الجماعية الحالية")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def game_end(self, interaction: discord.Interaction):
-        key = (interaction.guild.id, interaction.channel.id)
-        session = self.sessions.pop(key, None)
-        if not session:
-            return await interaction.response.send_message("❌ ما كايناش لعبة جماعية مفتوحة هنا.", ephemeral=True)
-        await interaction.response.send_message("🛑 تم إغلاق اللعبة الجماعية.")
-
-    async def _prefix_start(self, message: discord.Message, game_type: str, args: list[str]):
-        if not isinstance(message.author, discord.Member) or not message.author.guild_permissions.manage_guild:
-            return await self._reply(message, "❌ غير الإدارة تقدر تشغل الألعاب الجماعية.")
-        reward = 5
-        maximum = 15
-        if args and args[0].isdigit():
-            reward = max(0, min(int(args[0]), 1000))
-        if len(args) > 1 and args[1].isdigit():
-            maximum = max(2, min(int(args[1]), 15))
-
-        session, error = self.start_session(
-            message.guild,
-            message.channel.id,
-            message.author.id,
-            game_type,
-            reward,
-            maximum,
-        )
-        if error:
-            return await self._reply(message, error)
-        await self.send_lobby(message.channel, session)
-
-    async def _prefix_join(self, message: discord.Message):
-        session = self.sessions.get((message.guild.id, message.channel.id))
-        if not session:
-            return await self._reply(message, "❌ ما كايناش لعبة جماعية مفتوحة هنا.")
-        if session.active:
-            return await self._reply(message, "❌ الجولة بدات، ما يمكنش تدخل دابا.")
-        if message.author.id in session.players:
-            return await self._reply(message, "⚠️ أنت داخل اللعبة أصلاً.")
-        if len(session.players) >= session.max_players:
-            return await self._reply(message, f"❌ اللعبة عامرة. الحد الأقصى هو {session.max_players} لاعب.")
-        session.players.append(message.author.id)
-        self.assign_seats(session)
-        await self._reply(message, f"✅ دخل {message.author.mention} للعبة. **{len(session.players)}/{session.max_players}**")
-
-    async def _prefix_leave(self, message: discord.Message):
-        session = self.sessions.get((message.guild.id, message.channel.id))
-        if not session or session.active or message.author.id not in session.players:
-            return await self._reply(message, "❌ ما نتايش داخل لوبي لعبة جماعية هنا.")
-        if message.author.id == session.starter_id:
-            return await self._reply(message, "❌ مشغل اللعبة ما يقدرش يخرج؛ استعمل `!انهاء`.")
-        session.players.remove(message.author.id)
-        self.assign_seats(session)
-        await self._reply(message, f"✅ خرج {message.author.mention} من اللعبة.")
-
-    async def _prefix_spin(self, message: discord.Message):
-        session = self.sessions.get((message.guild.id, message.channel.id))
-        if not session:
-            return await self._reply(message, "❌ ما كايناش لعبة جماعية مفتوحة هنا.")
-        if session.active:
-            return await self._reply(message, "⚠️ الجولة خدامة دابا.")
-        if not isinstance(message.author, discord.Member) or (
-            message.author.id != session.starter_id and not message.author.guild_permissions.manage_guild
-        ):
-            return await self._reply(message, "❌ غير مشغل اللعبة أو الإدارة يقدر يبدأ الجولة.")
-        if len(session.players) < session.min_players:
-            return await self._reply(message, f"❌ خاص على الأقل **{session.min_players} لاعبين** باش تبدأ اللعبة.")
-
-        if session.game_type == "roulette":
+            for remaining in range(LOBBY_SECONDS, -1, -1):
+                if key not in self.sessions or session.active or session.stop_requested:
+                    break
+                # Discord's relative timestamp also keeps counting down without requiring rapid edits.
+                if remaining in {LOBBY_SECONDS, 20, 15, 10, 5, 4, 3, 2, 1, 0}:
+                    await lobby.edit(embed=self.lobby_embed(session, remaining=remaining), view=view)
+                await asyncio.sleep(1)
+            if key not in self.sessions or session.active or session.stop_requested:
+                return
+            if len(session.players) < MIN_PLAYERS:
+                await lobby.edit(embed=discord.Embed(title="❌ لم تبدأ الفعالية", description=f"انتهى الوقت ولم يصل العدد إلى **{MIN_PLAYERS}** لاعبين.", color=discord.Color.red()), view=None)
+                return
             session.active = True
-            await self._reply(message, "🎰 جاري تدوير الروليت...")
-            # The new lobby/message remains the main game board; find it when possible.
-            channel = message.channel
-            board = None
-            if session.message_id:
-                try:
-                    board = await channel.fetch_message(session.message_id)
-                except discord.HTTPException:
-                    board = None
-            if board:
-                session.active = False
-                await self.run_roulette(channel, session, existing_message=board)
-            else:
-                session.active = False
-                await self.run_roulette(channel, session)
-        else:
-            await self._reply(message, await self.finish_dice(message.channel, session))
+            session.task = asyncio.create_task(self.run_dice(message.channel, session, lobby))
+            await session.task
+        finally:
+            if self.sessions.get(key) is session and (session.task is None or session.task.done()):
+                self.sessions.pop(key, None)
 
-    async def _prefix_end(self, message: discord.Message):
-        if not isinstance(message.author, discord.Member) or not message.author.guild_permissions.manage_guild:
-            return await self._reply(message, "❌ غير الإدارة تقدر تسالي اللعبة.")
-        if not self.sessions.pop((message.guild.id, message.channel.id), None):
-            return await self._reply(message, "❌ ما كايناش لعبة جماعية مفتوحة هنا.")
-        await self._reply(message, "🛑 تم إغلاق اللعبة الجماعية.")
+    async def run_dice(self, channel: discord.abc.Messageable, session: GameSession, lobby: discord.Message) -> None:
+        if session.stop_requested:
+            return
+        session.active = True
+        results: dict[int, int] = {}
+        for user_id in list(session.players):
+            if session.stop_requested:
+                return
+            results[user_id] = random.randint(1, 6)
+
+        winner_id, winner_value = max(results.items(), key=lambda item: (item[1], random.random()))
+        guild = self.bot.get_guild(session.guild_id)
+        lines = []
+        for user_id, value in results.items():
+            member = guild.get_member(user_id) if guild else None
+            name = member.display_name if member else f"عضو {user_id}"
+            lines.append(f"**{name}** — 🎲 **{value}**")
+
+        self.add_points(session.guild_id, winner_id, session.reward)
+        winner_mention = f"<@{winner_id}>"
+        embed = discord.Embed(title="🏆 معركة النرد — انتهت", description="\n".join(lines), color=discord.Color.green())
+        embed.add_field(name="الفائز", value=winner_mention, inline=True)
+        embed.add_field(name="الجائزة", value=f"**+{session.reward} نقطة**", inline=True)
+        embed.set_footer(text="يمكنكم بدء فعالية جديدة")
+        await lobby.edit(embed=embed, view=None)
+
+    async def stop(self, message: discord.Message) -> bool:
+        if not isinstance(message.author, discord.Member) or not can_manage_events(message.author):
+            await message.reply("❌ غير الإدارة أو رئيس الفعاليات يقدر يوقف الفعاليات.", mention_author=False)
+            return True
+        key = (message.guild.id, message.channel.id)
+        session = self.sessions.get(key)
+        if not session:
+            return False
+        session.stop_requested = True
+        task = session.task
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.sessions.pop(key, None)
+        await message.reply("✅ تم إيقاف اللعبة.", mention_author=False)
+        return True
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        content = message.content.strip()
-        if content.startswith("!روليت"):
-            await self._prefix_start(message, "roulette", content.split()[1:])
-        elif content.startswith("!نرد"):
-            await self._prefix_start(message, "dice_battle", content.split()[1:])
-        elif content == "!دخول":
-            await self._prefix_join(message)
-        elif content == "!خروج":
-            await self._prefix_leave(message)
-        elif content in {"!ابدأ", "!بدء"}:
-            await self._prefix_spin(message)
-        elif content in {"!انهاء", "!إنهاء"}:
-            await self._prefix_end(message)
-        elif content == "!العاب":
-            await self._reply(
-                message,
-                "🎮 `!روليت [النقاط] [الحد]`\n"
-                "🎲 `!نرد [النقاط] [الحد]`\n"
-                "👥 `!دخول` — `!خروج`\n"
-                "▶️ `!ابدأ` — 🛑 `!انهاء`\n\n"
-                "🎰 الروليت الآن Survival متعددة الجولات، من 2 حتى 15 لاعب.\n"
-                "⭐ نقاط الفوز غير مرتبطة بالألعاب الفردية.",
-            )
-
-    @app_commands.command(name="games", description="عرض الألعاب الجماعية والفردية")
-    async def games(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            "🎮 **الجماعية:** الروليت، معركة النرد — الإدارة تشغلها، من 2 حتى 15 لاعب.\n"
-            "🎯 **الفردية:** /coinflip و /solo-dice و /rps — بدون نقاط."
-        )
-
-    @app_commands.command(name="coinflip", description="لعبة فردية: وجه أو كتابة")
-    async def coinflip(self, interaction: discord.Interaction):
-        await interaction.response.send_message(f"🪙 النتيجة: **{random.choice(('وجه', 'كتابة'))}**")
-
-    @app_commands.command(name="solo-dice", description="لعبة فردية: رمية نرد")
-    async def solo_dice(self, interaction: discord.Interaction):
-        await interaction.response.send_message(f"🎲 رميتك: **{random.randint(1, 6)}**")
-
-    @app_commands.command(name="rps", description="لعبة فردية: حجر ورق مقص")
-    @app_commands.choices(
-        choice=[
-            app_commands.Choice(name="حجر", value="حجر"),
-            app_commands.Choice(name="ورق", value="ورق"),
-            app_commands.Choice(name="مقص", value="مقص"),
-        ]
-    )
-    async def rps(self, interaction: discord.Interaction, choice: app_commands.Choice[str]):
-        bot_choice = random.choice(("حجر", "ورق", "مقص"))
-        if choice.value == bot_choice:
-            result = "تعادل"
-        elif (choice.value, bot_choice) in (("حجر", "مقص"), ("ورق", "حجر"), ("مقص", "ورق")):
-            result = "فزت"
-        else:
-            result = "خسرت"
-        await interaction.response.send_message(
-            f"✊ اختيارك: **{choice.value}** | 🤖: **{bot_choice}**\n**{result}** — بدون نقاط."
-        )
-
-    @app_commands.command(name="points", description="عرض نقاطك أو نقاط عضو")
-    async def points(self, interaction: discord.Interaction, member: discord.Member | None = None):
-        member = member or interaction.user
-        with connect() as con:
-            row = con.execute(
-                "SELECT points FROM points WHERE guild_id=? AND user_id=?",
-                (interaction.guild.id, member.id),
-            ).fetchone()
-        value = row["points"] if row else 0
-        await interaction.response.send_message(f"⭐ نقاط {member.mention}: **{value}**")
+        content = message.content.strip().lower()
+        if content in {"-نرد", "-dice", "-معركة النرد"}:
+            await self.start_lobby(message)
+        elif content == "-توقيف":
+            if (message.guild.id, message.channel.id) in self.sessions:
+                await self.stop(message)
 
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(Games(bot))
