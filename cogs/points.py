@@ -155,78 +155,74 @@ def _paste_avatar(image: Image.Image, avatar_bytes: bytes | None) -> None:
 
 
 def build_points_image(member: discord.Member, values: dict[str, int], avatar_bytes: bytes | None = None) -> discord.File:
-    # Designed around the supplied reference: dark navy canvas, blue card,
-    # avatar/name/total block and three game categories at the bottom.
-    width, height = 1200, 675
-    image = Image.new("RGB", (width, height), (4, 7, 21))
+    # بطاقة نقاط مستوحاة مباشرة من التصميم المرجعي: خلفية داكنة،
+    # لوحة زرقاء كبيرة، بطاقة العضو، ثم إحصاءات الألعاب الثلاثة.
+    width, height = 1536, 620
+    image = Image.new("RGB", (width, height), (3, 5, 15))
     draw = ImageDraw.Draw(image)
 
-    # Subtle navy background glow.
-    draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=34, fill=(6, 15, 45))
+    # Main blue background card.
+    draw.rounded_rectangle((18, 108, width - 72, 595), radius=76, fill=(15, 48, 158))
+    draw.rounded_rectangle((24, 114, width - 78, 589), radius=70, outline=(34, 81, 214), width=3)
 
-    # Main blue card.
-    draw.rounded_rectangle(
-        (42, 118, width - 42, 485),
-        radius=42,
-        fill=(8, 48, 171),
-        outline=(22, 77, 220),
-        width=3,
-    )
+    # Title pill.
+    draw.rounded_rectangle((1218, 18, 1524, 146), radius=64, fill=(18, 52, 159), outline=(48, 101, 255), width=3)
+    _centered_text(draw, (1218, 18, 1524, 146), "نقاطي", _font(52), (248, 249, 255))
 
-    # Header pill, matching the reference composition.
-    draw.rounded_rectangle((930, 24, 1175, 103), radius=38, fill=(5, 27, 92), outline=(7, 45, 145), width=2)
-    _centered_text(draw, (930, 24, 1175, 103), "نقاطي", _font(34), (245, 248, 255))
+    # Member information panel.
+    draw.rounded_rectangle((58, 158, width - 130, 408), radius=42, fill=(22, 50, 138))
+    draw.rounded_rectangle((58, 158, width - 130, 408), radius=42, outline=(12, 33, 104), width=4)
 
-    # Avatar ring and avatar.
-    draw.ellipse((84, 162, 270, 348), fill=(248, 250, 255))
+    # Avatar ring.
+    draw.ellipse((84, 190, 278, 384), fill=(246, 248, 255))
+    draw.ellipse((92, 198, 270, 376), fill=(18, 35, 92))
     if avatar_bytes:
         try:
             avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
-            avatar = ImageOps.fit(avatar, (170, 170), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-            image.paste(avatar, (100, 170), _rounded_mask(170, 85))
+            avatar = ImageOps.fit(avatar, (170, 170), method=Image.Resampling.LANCZOS)
+            image.paste(avatar, (96, 202), _rounded_mask(170, 85))
         except (OSError, ValueError):
             pass
 
-    display_name = member.display_name or member.name
-    if len(display_name) > 22:
-        display_name = display_name[:21] + "…"
+    display_name = (member.display_name or member.name).strip()
+    if len(display_name) > 20:
+        display_name = display_name[:19] + "…"
 
-    _centered_text(draw, (318, 150, 1085, 222), display_name, _font(34), (250, 252, 255))
+    # Keep the username visually in the same area as the reference.
+    draw.text((330, 200), _shape_text(display_name), font=_font(58), fill=(250, 251, 255))
+    draw.text((330, 290), _shape_text(f"{values['total']:,} نقطة"), font=_font(54), fill=(250, 251, 255))
 
-    total_text = f"{values['total']} نقطة"
-    _centered_text(draw, (318, 225, 1085, 345), total_text, _font(66), (255, 255, 255))
+    # Statistics panel.
+    draw.rounded_rectangle((82, 438, width - 154, 575), radius=30, fill=(10, 30, 96))
+    draw.rounded_rectangle((82, 438, width - 154, 575), radius=30, outline=(23, 58, 159), width=2)
 
-    # Bottom statistics panel.
-    draw.rounded_rectangle(
-        (60, 510, width - 60, 650),
-        radius=30,
-        fill=(5, 23, 77),
-        outline=(14, 53, 145),
-        width=2,
-    )
-
+    # RTL order matching the reference: فردية | جماعية | روليت.
     columns = [
-        ("roulette", 60, 420),
-        ("group", 420, 780),
-        ("individual", 780, 1140),
+        ("individual", 82, 535),
+        ("group", 535, 988),
+        ("roulette", 988, 1382),
     ]
-    value_font = _font(34)
-    label_font = _font(26)
-    for key, left, right in columns:
-        if left != 60:
-            draw.line((left, 535, left, 625), fill=(31, 72, 160), width=2)
-        _centered_text(draw, (left + 10, 524, right - 10, 570), f"{CATEGORY_LABELS[key]}: {values[key]}", value_font, (248, 250, 255))
-        _centered_text(draw, (left + 10, 570, right - 10, 625), "نقاط اللعبة", label_font, (173, 190, 235))
-
-    # Keep the card clean on short and long names.
-    footer_font = _font(19, bold=False)
-    _centered_text(draw, (60, 652, 1140, 674), "Nawaf • Points", footer_font, (102, 125, 177))
+    for index, (key, left, right) in enumerate(columns):
+        if index:
+            draw.line((left, 460, left, 554), fill=(33, 68, 164), width=2)
+        _centered_text(
+            draw,
+            (left + 12, 454, right - 12, 510),
+            f"{CATEGORY_LABELS[key]}: {values[key]:,}",
+            _font(38),
+            (250, 251, 255),
+        )
+        subtitle = {
+            "individual": "نقاط الألعاب الفردية",
+            "group": "نقاط الألعاب الجماعية",
+            "roulette": "نقاط الروليت",
+        }[key]
+        _centered_text(draw, (left + 12, 512, right - 12, 560), subtitle, _font(25), (223, 229, 255))
 
     buffer = io.BytesIO()
     image.save(buffer, "PNG", optimize=True)
     buffer.seek(0)
     return discord.File(buffer, filename="nawaf-points.png")
-
 
 class Points(commands.Cog):
     """Categorized game points and the image-based `-نقاطي` card."""
