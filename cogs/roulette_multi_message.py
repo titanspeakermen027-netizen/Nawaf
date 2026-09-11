@@ -241,23 +241,31 @@ class RouletteMultiMessage(commands.Cog):
         buffer.seek(0)
         return discord.File(buffer, filename="roulette-lobby.png")
 
-    def lobby_content(self, session: Session, page: int = 0, remaining: int = LOBBY_SECONDS) -> str:
+    def lobby_embed(self, session: Session, page: int = 0) -> discord.Embed:
+        guild = self.bot.get_guild(session.guild_id)
         total_pages = max(1, math.ceil(len(session.players) / PLAYERS_PER_PAGE))
         page = max(0, min(page, total_pages - 1))
         start = page * PLAYERS_PER_PAGE
-        guild = self.bot.get_guild(session.guild_id)
         rows = []
-        for pos, uid in enumerate(session.players[start:start+PLAYERS_PER_PAGE], start=start+1):
-            member = guild.get_member(uid) if guild else None
-            rows.append(f"**{pos}.** {member.name if member else uid} • <@{uid}>")
-        players = "\n".join(rows) if rows else "—"
-        return (
-            "**🎰 روليت**\n\n"
-            f"**عدد المشاركين:** `{len(session.players)} / {session.max_players}`\n"
-            f"**الحد الأدنى:** `{MIN_PLAYERS}`\n"
-            f"**الوقت المتبقي:** `{max(0, remaining)} ثانية`\n\n"
-            f"**المشاركون:**\n{players}\n\n"
-            f"**صفحة:** `{page+1}/{total_pages}`"
+        for uid in session.players[start:start + PLAYERS_PER_PAGE]:
+            rows.append(f"- <@{uid}>")
+        participants = "\n".join(rows) if rows else "— لا يوجد مشاركون حتى الآن —"
+
+        description = (
+            "**__شرح اللعبة:__**\n"
+            "1- انضم للعبة عبر الزر الأخضر الموجود في الأسفل.\n"
+            "2- تدور العجلة كل جولة وتختار لاعباً.\n"
+            "3- اللاعب المختار يمكنه طرد لاعب، أو الانسحاب، أو استخدام خاصية من حقيبته.\n"
+            "4- في آخر جولة تدور فيها العجلة، من يتم اختياره يفوز في اللعبة.\n\n"
+            f"**__المشاركين ({len(session.players)}/{session.max_players}):__**\n"
+            f"{participants}"
+        )
+        if total_pages > 1:
+            description += f"\n\n**الصفحة:** {page + 1}/{total_pages}"
+        return discord.Embed(
+            title=guild.name if guild else "روليت",
+            description=description,
+            color=discord.Color.blue(),
         )
 
     async def get_webhook(self, guild: discord.Guild, channel: discord.TextChannel) -> discord.Webhook | None:
@@ -303,7 +311,7 @@ class RouletteMultiMessage(commands.Cog):
             return
         with contextlib.suppress(discord.HTTPException, discord.Forbidden):
             file = self.lobby_art(guild, len(session.players), session.max_players)
-            await session.lobby_message.edit(content=self.lobby_content(session, page, remaining), attachments=[file], view=session.lobby_view)
+            await session.lobby_message.edit(content=None, embed=self.lobby_embed(session, page), attachments=[file], view=session.lobby_view)
 
     async def start_lobby(self, message, internal: bool = False):
         if not message.guild:
@@ -316,17 +324,16 @@ class RouletteMultiMessage(commands.Cog):
         if key in self.sessions:
             return await message.reply("❌ كاينة روليت مفتوحة فهاد الروم.", mention_author=False)
         session = Session(message.guild.id, message.channel.id, getattr(message.author, "id", message.guild.owner_id), max_players=get_server_max(message.guild.id))
-        session.players.append(getattr(message.author, "id", message.guild.owner_id))
         self.sessions[key] = session
         session.lobby_view = LobbyView(self, session)
         webhook = await self.get_webhook(message.guild, message.channel)
         if webhook:
             try:
-                session.lobby_message = await webhook.send(content=self.lobby_content(session, 0, LOBBY_SECONDS), file=self.lobby_art(message.guild, len(session.players), session.max_players), view=session.lobby_view, allowed_mentions=discord.AllowedMentions(users=True), wait=True)
+                session.lobby_message = await webhook.send(embed=self.lobby_embed(session, 0), file=self.lobby_art(message.guild, len(session.players), session.max_players), view=session.lobby_view, allowed_mentions=discord.AllowedMentions(users=True), wait=True)
             except (discord.Forbidden, discord.HTTPException):
                 session.lobby_message = None
         if session.lobby_message is None:
-            session.lobby_message = await message.channel.send(content=self.lobby_content(session,0,LOBBY_SECONDS), file=self.lobby_art(message.guild,len(session.players),session.max_players), view=session.lobby_view)
+            session.lobby_message = await message.channel.send(embed=self.lobby_embed(session, 0), file=self.lobby_art(message.guild,len(session.players),session.max_players), view=session.lobby_view)
         session.game_message_ids.add(session.lobby_message.id)
         session.lobby_task = asyncio.create_task(self.lobby_countdown(session))
 
