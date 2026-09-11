@@ -52,6 +52,8 @@ class Session:
     game_task: asyncio.Task | None = None
     decision_event: asyncio.Event = field(default_factory=asyncio.Event)
     decision: tuple[str, int | None] | None = None
+    # جميع رسائل الفعالية التي يجب مراقبة حذفها.
+    game_message_ids: set[int] = field(default_factory=set)
 
 
 class LobbyView(discord.ui.View):
@@ -284,10 +286,14 @@ class RouletteMultiMessage(commands.Cog):
         hook = await self.get_webhook(channel.guild, channel)
         if hook:
             try:
-                return await hook.send(allowed_mentions=discord.AllowedMentions(users=True), wait=True, **kwargs)
+                sent = await hook.send(allowed_mentions=discord.AllowedMentions(users=True), wait=True, **kwargs)
+                session.game_message_ids.add(sent.id)
+                return sent
             except (discord.Forbidden, discord.HTTPException):
                 self.webhooks.pop((session.guild_id, session.channel_id), None)
-        return await channel.send(allowed_mentions=discord.AllowedMentions(users=True), **kwargs)
+        sent = await channel.send(allowed_mentions=discord.AllowedMentions(users=True), **kwargs)
+        session.game_message_ids.add(sent.id)
+        return sent
 
     async def update_lobby(self, session: Session, page: int = 0, remaining: int = LOBBY_SECONDS):
         if not session.lobby_message:
@@ -321,6 +327,7 @@ class RouletteMultiMessage(commands.Cog):
                 session.lobby_message = None
         if session.lobby_message is None:
             session.lobby_message = await message.channel.send(content=self.lobby_content(session,0,LOBBY_SECONDS), file=self.lobby_art(message.guild,len(session.players),session.max_players), view=session.lobby_view)
+        session.game_message_ids.add(session.lobby_message.id)
         session.lobby_task = asyncio.create_task(self.lobby_countdown(session))
 
     async def lobby_countdown(self, session: Session):
@@ -440,12 +447,24 @@ class RouletteMultiMessage(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        # حذف أي رسالة تابعة للفعالية، سواء كانت رسالة اللوبي أو رسالة العجلة
+        # أو رسالة اختيار اللاعب، يلغي الجلسة كاملة حتى لا تستمر اللعبة برسائل ناقصة.
         for session in list(self.sessions.values()):
-            if session.lobby_message and session.lobby_message.id==payload.message_id and session.channel_id==payload.channel_id and not session.active:
-                channel=self.bot.get_channel(payload.channel_id)
-                await self.cancel_session(session,channel,notify=True)
-                if channel: await channel.send("⚠️ تم إلغاء الفعالية لأن رسالة التسجيل تم حذفها.")
-                break
+            if session.channel_id != payload.channel_id:
+                continue
+            if payload.message_id not in session.game_message_ids:
+                continue
+
+            channel = self.bot.get_channel(payload.channel_id)
+            await self.cancel_session(session, channel, notify=False)
+
+            if channel:
+                await self.send(
+                    session,
+                    channel,
+                    content="**❌ تم الغاؤ الفعالية بسبب حذف رسابة اللعبة**",
+                )
+            break
 
 
 async def setup(bot: commands.Bot):
