@@ -462,7 +462,7 @@ class RouletteMultiMessage(commands.Cog):
                 await self.send(
                     session,
                     channel,
-                    content="**❌ تم الغاؤ الفعالية بسبب حذف رسابة اللعبة**",
+                    content="**❌ تم الغاء اللعبة بسبب حذف رسالة اللعبة**",
                 )
             break
 
