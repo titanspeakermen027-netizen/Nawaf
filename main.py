@@ -22,8 +22,6 @@ COGS = (
     "cogs.applications_v2",
     "cogs.announcements",
     "cogs.dhikr",
-    "cogs.economy",
-    "cogs.shop",
     "cogs.config",
     "cogs.moderation",
     "cogs.prefix_systems",
