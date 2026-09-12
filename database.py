@@ -18,8 +18,7 @@ def init_db():
             guild_id INTEGER PRIMARY KEY,
             announcement_channel INTEGER, ad_channel INTEGER, application_channel INTEGER,
             application_review_channel INTEGER, dhikr_channel INTEGER, dhikr_enabled INTEGER DEFAULT 0,
-            dhikr_interval INTEGER DEFAULT 3600, currency_name TEXT DEFAULT 'Nawaf Coin',
-            currency_symbol TEXT DEFAULT '🪙', ticket_category INTEGER, ticket_log_channel INTEGER,
+            dhikr_interval INTEGER DEFAULT 3600, ticket_category INTEGER, ticket_log_channel INTEGER,
             ticket_panel_channel INTEGER, ticket_panel_message INTEGER, ticket_panel_title TEXT DEFAULT '🎫 الدعم الفني',
             ticket_panel_description TEXT DEFAULT 'اضغط على الزر لفتح تذكرة.', ticket_rating_max INTEGER DEFAULT 10,
             application_panel_channel INTEGER, application_panel_message INTEGER, shop_order_channel INTEGER,
@@ -34,7 +33,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, type_id INTEGER, answers TEXT NOT NULL, image_url TEXT, status TEXT DEFAULT 'pending', reviewer_id INTEGER, review_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS application_types (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, name TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'تقديم الإدارة', description TEXT DEFAULT 'اضغط على الزر لبدء التقديم.', color INTEGER DEFAULT 5793266, image_url TEXT, review_channel_id INTEGER, result_channel_id INTEGER, accepted_role_id INTEGER, enabled INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS application_questions (id INTEGER PRIMARY KEY AUTOINCREMENT, type_id INTEGER NOT NULL, position INTEGER NOT NULL, question TEXT NOT NULL, required INTEGER DEFAULT 1, UNIQUE(type_id,position));
-        CREATE TABLE IF NOT EXISTS balances (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, balance INTEGER DEFAULT 0, PRIMARY KEY (guild_id,user_id));
         CREATE TABLE IF NOT EXISTS points (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, points INTEGER DEFAULT 0, PRIMARY KEY (guild_id,user_id));
         CREATE TABLE IF NOT EXISTS sent_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS shop_products (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, name TEXT NOT NULL, description TEXT DEFAULT '', price INTEGER NOT NULL, stock INTEGER DEFAULT -1, active INTEGER DEFAULT 1, delivery_type TEXT DEFAULT 'generic', role_id INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -60,6 +58,7 @@ def init_db():
         add_column("shop_products", "delivery_type", "TEXT")
         add_column("shop_products", "role_id", "INTEGER")
         add_column("shop_orders", "details", "TEXT")
+        con.execute("DROP TABLE IF EXISTS balances")
         con.execute("UPDATE guild_config SET ticket_panel_title='🎫 الدعم الفني' WHERE ticket_panel_title IS NULL")
         con.execute("UPDATE guild_config SET ticket_panel_description='اضغط على الزر لفتح تذكرة.' WHERE ticket_panel_description IS NULL")
         con.execute("UPDATE guild_config SET ticket_rating_max=10 WHERE ticket_rating_max IS NULL OR ticket_rating_max < 1")
