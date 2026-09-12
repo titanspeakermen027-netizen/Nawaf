@@ -36,6 +36,7 @@ COGS = (
     "cogs.help",
     "cogs.admin_prefix",
     "cogs.health",
+    "cogs.event_games",
 )
 
 
