@@ -1,28 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import re
 
 import discord
 from discord.ext import commands
 
 from database import connect, get_config
-from cogs.access_control import can_control_bot
-from cogs.transaction_verify import build_code_image, generate_code
-
-MENTION_RE = re.compile(r"^<@!?(\d+)>$")
-
-
-def resolve_member(guild: discord.Guild, token: str, message: discord.Message) -> discord.Member | None:
-    token = token.strip()
-    if message.mentions:
-        return message.mentions[0]
-    match = MENTION_RE.fullmatch(token)
-    raw_id = match.group(1) if match else token
-    if raw_id.isdigit():
-        return guild.get_member(int(raw_id))
-    return None
 
 
 class RatingView(discord.ui.View):
@@ -85,157 +68,14 @@ class RatingNoteModal(discord.ui.Modal):
 
 
 class PrefixSystems(commands.Cog):
+    """Prefix utilities unrelated to the retired economy system."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.transfer_locks: set[tuple[int, int]] = set()
 
     async def _reply(self, message: discord.Message, content: str, **kwargs):
         kwargs.setdefault("mention_author", False)
         return await message.reply(content, **kwargs)
-
-    async def handle_c(self, message: discord.Message):
-        content = message.content.strip()
-        if not re.match(r"(?i)^c(?:\s|$)", content):
-            return False
-        tail = content[1:].strip()
-        if not tail:
-            await self.show_balance(message, message.author)
-            return True
-        parts = tail.split()
-        if len(parts) == 1:
-            member = resolve_member(message.guild, parts[0], message)
-            if not member:
-                await self._reply(message, "❌ العضو غير موجود. استعمل `C` أو `C @user` أو `C id`.")
-                return True
-            await self.show_balance(message, member)
-            return True
-        if len(parts) == 2:
-            member = resolve_member(message.guild, parts[0], message)
-            try:
-                amount = int(parts[1].replace(",", ""))
-            except ValueError:
-                amount = 0
-            if not member or amount <= 0:
-                await self._reply(message, "❌ الاستعمال: `C @user المبلغ` أو `C id المبلغ`.")
-                return True
-            await self.start_transfer(message, member, amount)
-            return True
-        await self._reply(message, "❌ الاستعمال: `C` — `C @user` — `C @user المبلغ`.")
-        return True
-
-    async def show_balance(self, message: discord.Message, member: discord.Member):
-        with connect() as con:
-            row = con.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (message.guild.id, member.id)).fetchone()
-            balance = row["balance"] if row else 0
-        cfg = get_config(message.guild.id)
-        await self._reply(message, f"**{member.name}، رصيدك الحالي هو `{balance}` {cfg['currency_symbol']}**")
-
-    async def start_transfer(self, message: discord.Message, target: discord.Member, amount: int):
-        guild = message.guild
-        sender = message.author
-        key = (guild.id, sender.id)
-        if key in self.transfer_locks:
-            await self._reply(message, "❌ عندك عملية تحويل قيد التحقق بالفعل.")
-            return
-        if target.bot or target.id == sender.id:
-            await self._reply(message, "❌ ما يمكنش تحول لنفسك أو لبوت.")
-            return
-        with connect() as con:
-            row = con.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (guild.id, sender.id)).fetchone()
-            sender_balance = row["balance"] if row else 0
-        if sender_balance < amount:
-            await self._reply(message, "❌ رصيدك غير كافي لإتمام التحويل.")
-            return
-        self.transfer_locks.add(key)
-        verification_message = None
-        try:
-            code = generate_code()
-            file = build_code_image(code)
-            verification_message = await message.reply(
-                "🔐 **تحقق من عملية التحويل**\nاكتب الأرقام اللي فالصورة هنا خلال **60 ثانية**.",
-                file=file,
-                mention_author=False,
-            )
-            deadline = asyncio.get_running_loop().time() + 60
-            while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                def check(candidate: discord.Message):
-                    return candidate.author.id == sender.id and candidate.channel.id == message.channel.id and not candidate.author.bot
-                try:
-                    candidate = await self.bot.wait_for("message", timeout=remaining, check=check)
-                except asyncio.TimeoutError:
-                    break
-                if candidate.content.strip() == code:
-                    with connect() as con:
-                        sender_row = con.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (guild.id, sender.id)).fetchone()
-                        live_balance = sender_row["balance"] if sender_row else 0
-                        if live_balance < amount:
-                            with contextlib.suppress(discord.HTTPException):
-                                await candidate.delete()
-                            await self._reply(message, "❌ الرصيد تبدل وما بقاش كافي لإتمام التحويل.")
-                            return
-                        con.execute("INSERT OR IGNORE INTO balances(guild_id,user_id,balance) VALUES(?,?,0)", (guild.id, target.id))
-                        con.execute("UPDATE balances SET balance=balance-? WHERE guild_id=? AND user_id=?", (amount, guild.id, sender.id))
-                        con.execute("UPDATE balances SET balance=balance+? WHERE guild_id=? AND user_id=?", (amount, guild.id, target.id))
-                    with contextlib.suppress(discord.HTTPException):
-                        await verification_message.delete()
-                    with contextlib.suppress(discord.HTTPException):
-                        await candidate.delete()
-                    await self._reply(message, f"**{sender.name} قام بتحويل `{amount}` {get_config(guild.id)['currency_symbol']} إلى {target.mention}.** 💳")
-                    with contextlib.suppress(discord.HTTPException):
-                        await message.delete()
-                    return
-                with contextlib.suppress(discord.HTTPException):
-                    await candidate.delete()
-            if verification_message:
-                with contextlib.suppress(discord.HTTPException):
-                    await verification_message.delete()
-            await self._reply(message, "⏱️ انتهت مهلة التحقق من التحويل، وما تمش تحويل أي مبلغ.")
-        finally:
-            self.transfer_locks.discard(key)
-
-    async def handle_gift(self, message: discord.Message) -> bool:
-        content = message.content.strip()
-        if not content:
-            return False
-        parts = content.split()
-        if parts[0].lower() not in {"اهداء", "إهداء", "اهدي", "أهدي"}:
-            return False
-        if not message.guild or not isinstance(message.author, discord.Member):
-            return True
-        if not can_control_bot(message.author):
-            await self._reply(message, "❌ غير الإدارة أو رتب التحكم في البوت تقدر تعطي العملات.")
-            return True
-        target = message.mentions[0] if message.mentions else None
-        if target is None and len(parts) >= 2:
-            target = resolve_member(message.guild, parts[1], message)
-        if target is None or target.bot:
-            await self._reply(message, "❌ الاستعمال: `اهداء @user 30`.")
-            return True
-        if len(parts) < 3:
-            await self._reply(message, "❌ الاستعمال: `اهداء @user 30`.")
-            return True
-        try:
-            amount = int(parts[2].replace(",", ""))
-        except ValueError:
-            amount = 0
-        if amount <= 0:
-            await self._reply(message, "❌ خاص المبلغ يكون أكبر من 0.")
-            return True
-        with connect() as con:
-            con.execute(
-                "INSERT OR IGNORE INTO balances(guild_id,user_id,balance) VALUES(?,?,0)",
-                (message.guild.id, target.id),
-            )
-            con.execute(
-                "UPDATE balances SET balance=balance+? WHERE guild_id=? AND user_id=?",
-                (amount, message.guild.id, target.id),
-            )
-        cfg = get_config(message.guild.id)
-        await self._reply(message, f"✅ تم إهداء **{amount:,} {cfg['currency_symbol']}** إلى {target.mention}.")
-        return True
 
     async def handle_rating_command(self, message: discord.Message):
         content = message.content.strip()
@@ -244,7 +84,10 @@ class PrefixSystems(commands.Cog):
         if not message.guild or not isinstance(message.author, discord.Member):
             return True
         with connect() as con:
-            row = con.execute("SELECT owner_id, closed_by, rating FROM tickets WHERE channel_id=?", (message.channel.id,)).fetchone()
+            row = con.execute(
+                "SELECT owner_id, closed_by, rating FROM tickets WHERE channel_id=?",
+                (message.channel.id,),
+            ).fetchone()
         if not row:
             await self._reply(message, "❌ هاد الروم ماشي تذكرة.")
             return True
@@ -259,7 +102,11 @@ class PrefixSystems(commands.Cog):
             return True
         cfg = get_config(message.guild.id)
         max_rating = max(1, min(10, int(cfg["ticket_rating_max"] or 10)))
-        await self._reply(message, "⭐ اختار التقييم، ومن بعد كتب الملاحظة ديالك فالنموذج اللي غادي يبان.", view=RatingView(message.channel.id, message.author.id, max_rating))
+        await self._reply(
+            message,
+            "⭐ اختار التقييم، ومن بعد كتب الملاحظة ديالك فالنموذج اللي غادي يبان.",
+            view=RatingView(message.channel.id, message.author.id, max_rating),
+        )
         return True
 
     async def handle_jail_shortcuts(self, message: discord.Message):
@@ -306,10 +153,6 @@ class PrefixSystems(commands.Cog):
         if message.author.bot or not message.guild:
             return False
         content = message.content.strip()
-        if await self.handle_gift(message):
-            return True
-        if re.match(r"(?i)^c(?:\s|$)", content):
-            return await self.handle_c(message)
         if content in {"-تقييم", "-تقييم التكت"}:
             return await self.handle_rating_command(message)
         if content == "سجن" or content.startswith("سجن ") or content == "عفو" or content.startswith("عفو "):
