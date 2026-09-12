@@ -130,74 +130,146 @@ def parse_duration(value: str) -> int | None:
 def format_dt(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-ARABIC_ROLE_PERMISSIONS = {
-    "عرض القنوات": "view_channel",
-    "إدارة القنوات": "manage_channels",
-    "إدارة الرتب": "manage_roles",
-    "إدارة الرسائل": "manage_messages",
-    "إدارة الخادم": "manage_guild",
-    "طرد الأعضاء": "kick_members",
-    "حظر الأعضاء": "ban_members",
-    "إنشاء الدعوات": "create_instant_invite",
-    "إرسال الرسائل": "send_messages",
-    "إرسال الرسائل في المواضيع": "send_messages_in_threads",
-    "تضمين الروابط": "embed_links",
-    "إرفاق الملفات": "attach_files",
-    "إضافة التفاعلات": "add_reactions",
-    "قراءة سجل الرسائل": "read_message_history",
-    "ذكر الجميع": "mention_everyone",
-    "إدارة الألقاب": "manage_nicknames",
-    "تغيير اللقب": "change_nickname",
-    "الاتصال": "connect",
-    "التحدث": "speak",
-    "كتم الأعضاء": "mute_members",
-    "تحريك الأعضاء": "move_members",
-    "إدارة الأحداث": "manage_events",
-    "إدارة الويبهوكات": "manage_webhooks",
-    "إدارة الإيموجيات": "manage_expressions",
+
+# All permission flags exposed by the installed discord.py version are shown.
+# Arabic names are provided for Discord's current permission set; unknown/new
+# flags automatically fall back to a readable English label so they are never omitted.
+ARABIC_PERMISSION_NAMES = {
+    "administrator": "Administrator",
+    "view_channel": "عرض القنوات",
+    "manage_channels": "إدارة القنوات",
+    "manage_roles": "إدارة الرتب",
+    "manage_permissions": "إدارة الصلاحيات",
+    "manage_webhooks": "إدارة الويبهوكات",
+    "manage_expressions": "إدارة الإيموجي والملصقات",
+    "manage_guild": "إدارة الخادم",
+    "view_audit_log": "عرض سجل التدقيق",
+    "view_guild_insights": "عرض إحصائيات الخادم",
+    "manage_nicknames": "إدارة الألقاب",
+    "change_nickname": "تغيير اللقب",
+    "kick_members": "طرد الأعضاء",
+    "ban_members": "حظر الأعضاء",
+    "moderate_members": "إدارة الأعضاء",
+    "create_instant_invite": "إنشاء الدعوات",
+    "send_messages": "إرسال الرسائل",
+    "send_messages_in_threads": "إرسال الرسائل في المواضيع",
+    "create_public_threads": "إنشاء المواضيع العامة",
+    "create_private_threads": "إنشاء المواضيع الخاصة",
+    "embed_links": "تضمين الروابط",
+    "attach_files": "إرفاق الملفات",
+    "read_message_history": "قراءة سجل الرسائل",
+    "mention_everyone": "ذكر الجميع",
+    "use_external_emojis": "استخدام الإيموجي الخارجي",
+    "use_external_stickers": "استخدام الملصقات الخارجية",
+    "add_reactions": "إضافة التفاعلات",
+    "connect": "الاتصال الصوتي",
+    "speak": "التحدث",
+    "stream": "البث",
+    "use_voice_activation": "استخدام تفعيل الصوت",
+    "priority_speaker": "المتحدث ذو الأولوية",
+    "mute_members": "كتم الأعضاء",
+    "deafen_members": "كتم سماع الأعضاء",
+    "move_members": "تحريك الأعضاء",
+    "use_soundboard": "استخدام لوحة الأصوات",
+    "use_external_sounds": "استخدام الأصوات الخارجية",
+    "request_to_speak": "طلب التحدث",
+    "manage_events": "إدارة الأحداث",
+    "send_polls": "إرسال الاستطلاعات",
+    "create_events": "إنشاء الأحداث",
+    "use_external_apps": "استخدام التطبيقات الخارجية",
 }
 
-def permissions_from_arabic(labels: list[str]) -> discord.Permissions:
-    if len(labels) > 10:
-        raise ValueError("لا يمكن تحديد أكثر من 10 صلاحيات.")
+
+def pretty_permission_name(flag: str) -> str:
+    translated = ARABIC_PERMISSION_NAMES.get(flag)
+    if translated:
+        return translated
+    words = flag.replace("_", " ").strip().title()
+    return words or flag
+
+
+def all_permission_items() -> list[tuple[str, str]]:
+    # discord.py keeps the complete supported permission set in VALID_FLAGS.
+    # This also makes the UI automatically include newly added Discord permissions.
+    return [(pretty_permission_name(flag), flag) for flag in discord.Permissions.VALID_FLAGS]
+
+
+def permissions_from_flags(flags: list[str]) -> discord.Permissions:
     permissions = discord.Permissions.none()
-    for label in labels:
-        flag = ARABIC_ROLE_PERMISSIONS.get(label)
-        if flag:
+    valid = discord.Permissions.VALID_FLAGS
+    for flag in flags:
+        if flag in valid:
             setattr(permissions, flag, True)
     return permissions
 
+
 class RolePermissionsView(discord.ui.View):
     def __init__(self, cog: "Premium", target_role: discord.Role | None, role_name: str | None):
-        super().__init__(timeout=180)
+        super().__init__(timeout=300)
         self.cog = cog
         self.target_role = target_role
         self.role_name = role_name
-        self.selected: list[str] = []
+        self.selected: set[str] = set()
+        self.permission_selects: list[discord.ui.Select] = []
+        self.labels_by_flag = {flag: label for label, flag in all_permission_items()}
 
-        options = [
-            discord.SelectOption(label=name, value=name)
-            for name in ARABIC_ROLE_PERMISSIONS
-        ]
-        self.select = discord.ui.Select(
-            placeholder="حدد الصلاحيات بالعربية (حتى 10 صلاحيات)",
-            min_values=0,
-            max_values=10,
-            options=options,
+        items = all_permission_items()
+        # Discord select menus allow at most 25 options each. Split all
+        # permissions across multiple menus so every Discord permission is available.
+        chunks = [items[index:index + 25] for index in range(0, len(items), 25)]
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            options = [
+                discord.SelectOption(
+                    label=label[:100],
+                    value=flag,
+                    default=flag in self.selected,
+                )
+                for label, flag in chunk
+            ]
+            select = discord.ui.Select(
+                placeholder=f"حدد الصلاحيات — القائمة {chunk_index}",
+                min_values=0,
+                max_values=len(options),
+                options=options,
+                row=chunk_index - 1,
+            )
+            select.callback = self.select_permissions
+            self.permission_selects.append(select)
+            self.add_item(select)
+
+        self.apply_button = discord.ui.Button(
+            label="تطبيق الصلاحيات",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            row=min(len(chunks), 4),
         )
-        self.select.callback = self.select_permissions
-        self.add_item(self.select)
+        self.apply_button.callback = self.apply
+        self.add_item(self.apply_button)
 
     async def select_permissions(self, interaction: discord.Interaction):
-        self.selected = list(self.select.values)
-        preview = "بدون صلاحيات" if not self.selected else "\n".join(f"• {item}" for item in self.selected)
+        # Replace only the values belonging to the changed menu, keeping selections
+        # made in the other permission menus intact.
+        for select in self.permission_selects:
+            chunk_flags = {option.value for option in select.options}
+            self.selected.difference_update(chunk_flags)
+            self.selected.update(select.values)
+            for option in select.options:
+                option.default = option.value in self.selected
+
+        preview = (
+            "بدون صلاحيات"
+            if not self.selected
+            else "\n".join(
+                f"• {self.labels_by_flag.get(flag, flag)}"
+                for flag in sorted(self.selected, key=lambda value: self.labels_by_flag.get(value, value))
+            )
+        )
         await interaction.response.edit_message(
-            content=f"**الصلاحيات المحددة:**\n{preview}\n\nاضغط **تطبيق الصلاحيات** للتأكيد.",
+            content=f"**الصلاحيات المحددة ({len(self.selected)}):**\n{preview}\n\nاضغط **تطبيق الصلاحيات** للتأكيد.",
             view=self,
         )
 
-    @discord.ui.button(label="تطبيق الصلاحيات", style=discord.ButtonStyle.success, emoji="✅")
-    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def apply(self, interaction: discord.Interaction):
         guild = interaction.guild
         if guild is None:
             return await interaction.response.send_message("❌ هذا الأمر متاح داخل السيرفر فقط.", ephemeral=True)
@@ -206,7 +278,8 @@ class RolePermissionsView(discord.ui.View):
         me = guild.me
         if me is None or not me.guild_permissions.manage_roles:
             return await interaction.response.send_message("❌ البوت يحتاج صلاحية إدارة الرتب.", ephemeral=True)
-        perms = permissions_from_arabic(self.selected)
+
+        perms = permissions_from_flags(list(self.selected))
         target = self.target_role
         if target is None:
             name = (self.role_name or "").strip()[:100]
@@ -219,14 +292,23 @@ class RolePermissionsView(discord.ui.View):
                 return await interaction.response.send_message("❌ لا يمكن للبوت تعديل رتبة أعلى من رتبته أو مساوية لها.", ephemeral=True)
             await target.edit(permissions=perms, reason=f"Role permissions configured by {interaction.user}")
             action = "تعديل"
-        shown = "بدون صلاحيات" if not self.selected else "\n".join(f"• {item}" for item in self.selected)
+
+        shown = (
+            "بدون صلاحيات"
+            if not self.selected
+            else "\n".join(
+                f"• {self.labels_by_flag.get(flag, flag)}"
+                for flag in sorted(self.selected, key=lambda value: self.labels_by_flag.get(value, value))
+            )
+        )
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(
-            content=f"✅ تم {action} الرتبة {target.mention} بنجاح.\n\n**الصلاحيات:**\n{shown}",
+            content=f"✅ تم {action} الرتبة {target.mention} بنجاح.\n\n**الصلاحيات ({len(self.selected)}):**\n{shown}",
             view=self,
         )
         self.stop()
+
 
 class Premium(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -259,7 +341,7 @@ class Premium(commands.Cog):
     @app_commands.command(name="premium-role", description="إنشاء رتبة أو تعديل صلاحيات رتبة")
     @app_commands.describe(
         role_name="اسم الرتبة الجديدة (اتركه فارغاً إذا اخترت رتبة)",
-        role="اختر رتبة موجودة لتعديلها"
+        role="اختر رتبة موجودة لتعديلها",
     )
     async def premium_role(
         self,
@@ -275,11 +357,10 @@ class Premium(commands.Cog):
             return await interaction.response.send_message("❌ اختر رتبة موجودة أو اكتب اسم رتبة جديدة.", ephemeral=True)
         view = RolePermissionsView(self, role, role_name)
         await interaction.response.send_message(
-            "**حدد صلاحيات الرتبة من القائمة التالية.**\nيمكنك تحديد من 0 إلى 10 صلاحيات، وجميع الأسماء بالعربية.",
+            "**حدد صلاحيات الرتبة من القوائم التالية.**\nجميع صلاحيات Discord متاحة، بما فيها **Administrator**. يمكنك تحديد أي عدد من الصلاحيات، والاختيارات بين القوائم تبقى محفوظة.",
             view=view,
             ephemeral=True,
         )
-
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
