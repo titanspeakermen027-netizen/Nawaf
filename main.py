@@ -24,6 +24,7 @@ COGS = (
     "cogs.dhikr",
     "cogs.config",
     "cogs.moderation",
+    "cogs.moderation_shortcuts",
     "cogs.prefix_systems",
     "cogs.games",
     "cogs.game_channels",
