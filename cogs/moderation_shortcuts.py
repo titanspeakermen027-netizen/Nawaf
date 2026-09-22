@@ -9,9 +9,9 @@ from discord.ext import commands
 from cogs.access_control import can_control_bot
 
 
-DURATION_RE = re.compile(r"^(\\d+)\\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$", re.IGNORECASE)
-USER_ID_RE = re.compile(r"^(\\d{15,25})$")
-CHANNEL_MENTION_RE = re.compile(r"^<#(\\d+)>$")
+DURATION_RE = re.compile(r"^(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$", re.IGNORECASE)
+USER_ID_RE = re.compile(r"^(\d{15,25})$")
+CHANNEL_MENTION_RE = re.compile(r"^<#(\d+)>$")
 MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60
 
 
