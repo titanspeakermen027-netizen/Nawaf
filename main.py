@@ -27,7 +27,6 @@ COGS = (
     "cogs.moderation_shortcuts",
     "cogs.prefix_systems",
     "cogs.game_channels",
-    "cogs.game_restrictions",
     "cogs.roulette_multi_message",
     "cogs.premium",
     "cogs.points",
