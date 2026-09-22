@@ -26,18 +26,14 @@ COGS = (
     "cogs.moderation",
     "cogs.moderation_shortcuts",
     "cogs.prefix_systems",
-    "cogs.games",
     "cogs.game_channels",
     "cogs.game_restrictions",
     "cogs.roulette_multi_message",
     "cogs.premium",
     "cogs.points",
-    "cogs.individual_games",
-    "cogs.game_voting",
     "cogs.help",
     "cogs.admin_prefix",
     "cogs.health",
-    "cogs.event_games",
     "cogs.dmall",
 )
 
