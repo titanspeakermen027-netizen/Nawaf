@@ -185,7 +185,18 @@ async def dm_user(user: discord.User, content: str) -> None:
 
 def is_manager(member: discord.Member) -> bool:
     perms = member.guild_permissions
-    return perms.administrator or perms.manage_guild or perms.manage_messages
+    return any(
+        (
+            perms.administrator,
+            perms.manage_guild,
+            perms.manage_messages,
+            perms.moderate_members,
+            perms.kick_members,
+            perms.ban_members,
+            perms.manage_roles,
+            perms.manage_channels,
+        )
+    )
 
 
 def can_manage_target(
@@ -359,6 +370,18 @@ class RelatedUserSelect(discord.ui.UserSelect):
             return await interaction.response.send_message("❌ غير مسموح.", ephemeral=True)
 
         selected = self.values[0]
+        if isinstance(selected, discord.Member):
+            if self.related_type == "مشكلة للإدارة" and not is_manager(selected):
+                return await interaction.response.send_message(
+                    "❌ السبب المختار هو مشكلة للإدارة، اختر عضواً من الإدارة.",
+                    ephemeral=True,
+                )
+            if self.related_type == "مشكلة لعضو" and is_manager(selected):
+                return await interaction.response.send_message(
+                    "❌ السبب المختار هو مشكلة لعضو، اختر عضواً عادياً.",
+                    ephemeral=True,
+                )
+
         reason = f"{self.related_type} — المتضرر: {selected.mention}"
         await self.cog.apply_warning(
             interaction,
