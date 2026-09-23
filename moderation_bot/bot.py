@@ -641,6 +641,9 @@ class ModerationBot(commands.Cog):
             )
 
         if action == "warn":
+            ok, error = can_manage_target(guild, actor, target)
+            if not ok:
+                return await interaction.response.send_message(error, ephemeral=True)
             await self.apply_warning(interaction, target, reason)
             return
 
@@ -2128,21 +2131,55 @@ class ModerationBot(commands.Cog):
 
     @discord.app_commands.command(
         name="ticket-panel",
-        description="إرسال بانل التذاكر في الروم الحالية"
+        description="إرسال بانل التذاكر في روم محددة"
     )
-    async def slash_ticket_panel(self, interaction: discord.Interaction):
+    @discord.app_commands.describe(
+        channel="الروم التي تريد وضع بانل التذاكر فيها"
+    )
+    async def slash_ticket_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ):
         if not is_manager(interaction.user):
-            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
-        if not isinstance(interaction.channel, discord.TextChannel):
-            return await interaction.response.send_message("❌ استعمل الأمر داخل روم نصية.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ هذا الأمر للإدارة فقط.",
+                ephemeral=True,
+            )
+
+        target_channel = channel or interaction.channel
+        if not isinstance(target_channel, discord.TextChannel):
+            return await interaction.response.send_message(
+                "❌ الروم غير صالحة.",
+                ephemeral=True,
+            )
+
+        perms = target_channel.permissions_for(interaction.guild.me)
+        if not perms.send_messages or not perms.embed_links:
+            return await interaction.response.send_message(
+                "❌ البوت خاصو Send Messages وEmbed Links في هاد الروم.",
+                ephemeral=True,
+            )
+
         await interaction.response.send_message(
             "✅ جاري تجهيز بانل التذاكر...",
             ephemeral=True,
         )
-        await self.create_ticket_panel_message(
-            interaction.guild,
-            interaction.channel,
-        )
+        try:
+            await self.create_ticket_panel_message(
+                interaction.guild,
+                target_channel,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Discord رفض إنشاء بانل التذاكر بسبب الصلاحيات.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "❌ وقع خطأ أثناء إنشاء بانل التذاكر.",
+                ephemeral=True,
+            )
 
     async def create_ticket_panel_message(self, guild, channel):
         embed = discord.Embed(
