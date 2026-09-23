@@ -39,6 +39,8 @@ def init_db() -> None:
                 ticket_log_channel_id INTEGER,
                 ticket_panel_channel_id INTEGER,
                 ticket_panel_message_id INTEGER,
+                ticket_panel_image_url TEXT,
+                ticket_panel_options TEXT,
                 mod_log_channel_id INTEGER,
                 warning_log_channel_id INTEGER,
                 jail_role_id INTEGER,
@@ -70,6 +72,7 @@ def init_db() -> None:
                 channel_id INTEGER PRIMARY KEY,
                 guild_id INTEGER NOT NULL,
                 owner_id INTEGER NOT NULL,
+                ticket_type TEXT,
                 claimed_by INTEGER,
                 closed_by INTEGER,
                 closed_at TEXT,
@@ -96,10 +99,21 @@ def init_db() -> None:
             row["name"]
             for row in con.execute("PRAGMA table_info(guild_settings)").fetchall()
         }
-        if "warning_log_channel_id" not in columns:
-            con.execute(
-                "ALTER TABLE guild_settings ADD COLUMN warning_log_channel_id INTEGER"
-            )
+        migrations = {
+            "warning_log_channel_id": "ALTER TABLE guild_settings ADD COLUMN warning_log_channel_id INTEGER",
+            "ticket_panel_image_url": "ALTER TABLE guild_settings ADD COLUMN ticket_panel_image_url TEXT",
+            "ticket_panel_options": "ALTER TABLE guild_settings ADD COLUMN ticket_panel_options TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                con.execute(statement)
+
+        ticket_columns = {
+            row["name"]
+            for row in con.execute("PRAGMA table_info(tickets)").fetchall()
+        }
+        if "ticket_type" not in ticket_columns:
+            con.execute("ALTER TABLE tickets ADD COLUMN ticket_type TEXT")
 
 
 def ensure_guild(guild_id: int) -> None:
@@ -126,6 +140,8 @@ def set_setting(guild_id: int, **values) -> None:
         "ticket_log_channel_id",
         "ticket_panel_channel_id",
         "ticket_panel_message_id",
+        "ticket_panel_image_url",
+        "ticket_panel_options",
         "mod_log_channel_id",
         "warning_log_channel_id",
         "jail_role_id",
@@ -161,6 +177,34 @@ def warning_rows(guild_id: int, user_id: int):
             """,
             (guild_id, user_id),
         ).fetchall()
+
+
+def parse_ticket_options(raw: str | None):
+    default = [
+        ("استفسار", "فتح تذكرة للاستفسار"),
+        ("إعلانات", "طلب متعلق بالإعلانات"),
+        ("شكوى", "تقديم شكوى"),
+        ("مساعدة", "طلب مساعدة"),
+    ]
+    if not raw:
+        return default
+
+    parsed = []
+    for item in raw.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "|" in item:
+            label, description = item.split("|", 1)
+        else:
+            label, description = item, "فتح تذكرة بهذا النوع"
+        label = label.strip()[:100]
+        description = description.strip()[:100]
+        if label:
+            parsed.append((label, description or "فتح تذكرة بهذا النوع"))
+        if len(parsed) >= 25:
+            break
+    return parsed or default
 
 
 def reason_options():
@@ -447,8 +491,7 @@ class RelatedUserSelect(discord.ui.UserSelect):
         if isinstance(selected, discord.Member):
             if self.related_type == "مشكلة للإدارة" and not is_manager(selected):
                 return await interaction.response.send_message(
-                    "❌ السبب المختار هو مشكلة للإدارة، اختر عضواً من الإدارة.",
-                    ephemeral=True,
+                    "❌ السبب المختار هو مشكلة للإدارة، اختر عضواً من الإدارة.",                    ephemeral=True,
                 )
             if self.related_type == "مشكلة لعضو" and is_manager(selected):
                 return await interaction.response.send_message(
@@ -540,19 +583,46 @@ class DurationView(discord.ui.View):
         )
 
 
+class TicketTypeSelect(discord.ui.Select):
+    def __init__(self, cog, guild_id: int):
+        self.cog = cog
+        self.guild_id = guild_id
+        settings = get_settings(guild_id)
+        options = parse_ticket_options(settings["ticket_panel_options"])
+        select_options = [
+            discord.SelectOption(
+                label=label,
+                description=description,
+                value=label,
+                emoji="🎫",
+            )
+            for label, description in options
+        ]
+        super().__init__(
+            placeholder="اختر نوع التذكرة...",
+            min_values=1,
+            max_values=1,
+            options=select_options,
+            custom_id=f"modbot:ticket:type:{guild_id}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        ticket_type = self.values[0].strip()
+        if not ticket_type:
+            return await interaction.response.send_message(
+                "❌ خيار التذكرة غير صالح.",
+                ephemeral=True,
+            )
+        await self.cog.create_ticket(interaction, ticket_type=ticket_type)
+
+
 class TicketPanelView(discord.ui.View):
-    def __init__(self, cog):
+    def __init__(self, cog, guild_id: int | None = None):
         super().__init__(timeout=None)
         self.cog = cog
-
-    @discord.ui.button(
-        label="فتح تذكرة",
-        style=discord.ButtonStyle.primary,
-        emoji="🎫",
-        custom_id="modbot:ticket:open",
-    )
-    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.create_ticket(interaction)
+        if guild_id is None:
+            return
+        self.add_item(TicketTypeSelect(cog, guild_id))
 
 
 class TicketControlsView(discord.ui.View):
@@ -699,7 +769,12 @@ class MassDMConfirmView(discord.ui.View):
 class SecondBot(commands.Bot):
     async def setup_hook(self):
         init_db()
-        self.add_view(TicketPanelView(self))
+        with connect() as con:
+            panel_rows = con.execute(
+                "SELECT guild_id FROM guild_settings WHERE ticket_panel_message_id IS NOT NULL"
+            ).fetchall()
+        for panel_row in panel_rows:
+            self.add_view(TicketPanelView(self, panel_row["guild_id"]))
         self.add_view(TicketControlsView(self))
 
         with connect() as con:
@@ -897,8 +972,7 @@ class ModerationBot(commands.Cog):
         guild = interaction.guild
         actor = interaction.user
 
-        try:
-            with connect() as con:
+        try:            with connect() as con:
                 con.execute(
                     """
                     INSERT INTO warnings(
@@ -1120,7 +1194,11 @@ class ModerationBot(commands.Cog):
             ),
         )
 
-    async def create_ticket(self, interaction: discord.Interaction):
+    async def create_ticket(
+        self,
+        interaction: discord.Interaction,
+        ticket_type: str | None = None,
+    ):
         guild = interaction.guild
         if not guild:
             return await interaction.response.send_message(
@@ -1186,17 +1264,24 @@ class ModerationBot(commands.Cog):
             con.execute(
                 """
                 INSERT INTO tickets(
-                    channel_id, guild_id, owner_id, created_at
+                    channel_id, guild_id, owner_id, ticket_type, created_at
                 )
-                VALUES(?,?,?,?)
+                VALUES(?,?,?,?,?)
                 """,
-                (channel.id, guild.id, interaction.user.id, utcnow()),
+                (
+                    channel.id,
+                    guild.id,
+                    interaction.user.id,
+                    ticket_type,
+                    utcnow(),
+                ),
             )
 
         embed = discord.Embed(
             title="🎫 تذكرة دعم",
             description=(
                 f"مرحباً {interaction.user.mention}\n"
+                f"نوع التذكرة: **{ticket_type or 'عام'}**\n\n"
                 "اكتب طلبك هنا، وسيستلمها أحد أعضاء الإدارة.\n\n"
                 "التحكم: استلام، إغلاق، حذف."
             ),
@@ -1347,8 +1432,7 @@ class ModerationBot(commands.Cog):
                 (channel_id,),
             ).fetchone()
 
-        if not row:
-            return await interaction.response.send_message(
+        if not row:            return await interaction.response.send_message(
                 "❌ التذكرة غير موجودة.",
                 ephemeral=True,
             )
@@ -1646,9 +1730,6 @@ class ModerationBot(commands.Cog):
         if not isinstance(message.author, discord.Member):
             return
 
-        if not is_manager(message.author):
-            return
-
         content = message.content.strip()
         if content.startswith(PREFIX):
             content = content[1:].strip()
@@ -1684,6 +1765,10 @@ class ModerationBot(commands.Cog):
             "تحذيرات": "warnings",
             "مسح_تحذير": "unwarn",
             "مسح_تحذيرات": "clearwarnings",
+            "ازالة_تحذير": "unwarn",
+            "إزالة_تحذير": "unwarn",
+            "ازالة_تحذيرات": "clearwarnings",
+            "إزالة_تحذيرات": "clearwarnings",
             "رسالة": "dm",
             "خاص": "dm",
             "للجميع": "massdm",
@@ -1704,6 +1789,19 @@ class ModerationBot(commands.Cog):
             "تقييمات": "ratings",
         }
         command = aliases.get(command, command)
+
+        protected_commands = {
+            "lock", "unlock", "purge",
+            "warn", "ban", "kick", "mute", "jail",
+            "unmute", "unjail", "warnings", "unwarn", "clearwarnings",
+            "dm", "massdm", "channelmsg",
+            "ticketpanel", "setwarninglog", "setlog", "setjail", "setticket",
+            "rate", "ratings",
+        }
+        if command in protected_commands and not is_manager(message.author):
+            return await message.reply(
+                "❌ ما عندك صلاحية استخدام هذا الأمر."
+            )
 
         if command == "lock":
             await self.lock_channel(message, True)
@@ -1797,8 +1895,7 @@ class ModerationBot(commands.Cog):
                     "❌ الاستعمال: رسالة @عضو النص"
                 )
 
-            text = message.content.split(
-                target.mention,
+            text = message.content.split(                target.mention,
                 1,
             )[-1].strip()
 
@@ -1880,7 +1977,26 @@ class ModerationBot(commands.Cog):
             return
 
         if command == "ticketpanel":
-            await self.create_ticket_panel(message)
+            image_url = None
+            options_text = None
+            if len(parts) > 1:
+                candidate = parts[1]
+                if candidate.startswith(("http://", "https://")):
+                    image_url = candidate
+                    if len(parts) > 2:
+                        options_text = " ".join(parts[2:])
+                else:
+                    options_text = " ".join(parts[1:])
+            try:
+                await self.create_ticket_panel_message(
+                    message.guild,
+                    message.channel,
+                    image_url=image_url,
+                    options_text=options_text,
+                )
+            except ValueError as exc:
+                return await message.reply(f"❌ {exc}")
+            await message.reply("✅ تم إنشاء بانل التذاكر بالقائمة والخيارات المحددة.")
             return
 
         if command == "setwarninglog":
@@ -2247,8 +2363,7 @@ class ModerationBot(commands.Cog):
     @discord.app_commands.describe(message="الرسالة التي ستصل للأعضاء")
     async def slash_mass_dm(self, interaction: discord.Interaction, message: str):
         if not is_manager(interaction.user):
-            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
-        await interaction.response.send_message(
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)        await interaction.response.send_message(
             (
                 "⚠️ هذا الإجراء سيرسل DM لجميع أعضاء السيرفر غير البوتات.\n"
                 f"الرسالة: {message}\n\n"
@@ -2263,12 +2378,16 @@ class ModerationBot(commands.Cog):
         description="إرسال بانل التذاكر في روم محددة"
     )
     @discord.app_commands.describe(
-        channel="الروم التي تريد وضع بانل التذاكر فيها"
+        channel="الروم التي تريد وضع بانل التذاكر فيها",
+        image="الصورة التي تريد ظهورها في البانل",
+        options="الاختيارات: اسم|وصف; اسم|وصف; ..."
     )
     async def slash_ticket_panel(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel | None = None,
+        image: discord.Attachment | None = None,
+        options: str | None = None,
     ):
         if not is_manager(interaction.user):
             return await interaction.response.send_message(
@@ -2290,6 +2409,7 @@ class ModerationBot(commands.Cog):
                 ephemeral=True,
             )
 
+        image_url = image.url if image else None
         await interaction.response.send_message(
             "✅ جاري تجهيز بانل التذاكر...",
             ephemeral=True,
@@ -2298,6 +2418,13 @@ class ModerationBot(commands.Cog):
             await self.create_ticket_panel_message(
                 interaction.guild,
                 target_channel,
+                image_url=image_url,
+                options_text=options,
+            )
+        except ValueError as exc:
+            await interaction.followup.send(
+                f"❌ {exc}",
+                ephemeral=True,
             )
         except discord.Forbidden:
             await interaction.followup.send(
@@ -2310,14 +2437,48 @@ class ModerationBot(commands.Cog):
                 ephemeral=True,
             )
 
-    async def create_ticket_panel_message(self, guild, channel):
+    async def create_ticket_panel_message(
+        self,
+        guild,
+        channel,
+        image_url: str | None = None,
+        options_text: str | None = None,
+    ):
+        settings = get_settings(guild.id)
+        if image_url is None:
+            image_url = settings["ticket_panel_image_url"]
+        if options_text is None:
+            options_text = settings["ticket_panel_options"]
+
+        if image_url and not image_url.startswith(("http://", "https://")):
+            raise ValueError("رابط صورة البانل غير صالح.")
+
+        options = parse_ticket_options(options_text)
+        stored_options = ";".join(
+            f"{label}|{description}" for label, description in options
+        )
+        set_setting(
+            guild.id,
+            ticket_panel_channel_id=channel.id,
+            ticket_panel_image_url=image_url,
+            ticket_panel_options=stored_options,
+        )
+
         embed = discord.Embed(
             title="🎫 الدعم والتذاكر",
-            description="اضغط على **فتح تذكرة** لفتح روم خاصة مع الإدارة.",
+            description=(
+                "اختر نوع التذكرة من القائمة بالأسفل لفتح تذكرة خاصة مع الإدارة."
+            ),
             color=discord.Color.blurple(),
             timestamp=discord.utils.utcnow(),
         )
-        sent = await channel.send(embed=embed, view=TicketPanelView(self))
+        if image_url:
+            embed.set_image(url=image_url)
+
+        sent = await channel.send(
+            embed=embed,
+            view=TicketPanelView(self, guild.id),
+        )
         set_setting(
             guild.id,
             ticket_panel_channel_id=channel.id,
