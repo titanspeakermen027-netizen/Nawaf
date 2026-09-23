@@ -30,79 +30,104 @@
 
 ### Startup واحد للاستضافة
 
-ما تحتاجش تشغّل جوج ملفات. الملف الرئيسي `main.py` كيشغّل **Nawaf + Roblox Monitor معاً في نفس العملية**، مع توكنين مستقلين:
+ما تحتاجش تشغّل جوج ملفات. الملف الرئيسي `main.py` كيشغّل **Nawaf + Roblox Monitor + Moderation Bot** معاً، وكل بوت عندو token مستقل.
 
-~~~bash
+```bash
 python main.py
-~~~
+```
 
 تفاصيل إعداد API وStudio Plugin موجودة في:
 
-~~~text
+```text
 roblox_monitor/README.md
 roblox_monitor/studio_plugin.lua
-~~~
+```
+
+تفاصيل بوت الإدارة والدعم موجودة في:
+
+```text
+moderation_bot/README.md
+```
 
 ## التشغيل
 
 1. ثبّت Python 3.11+.
 2. نفّذ pip install -r requirements.txt.
-3. أنشئ ملف .env وضع فيه:
-   DISCORD_TOKEN=توكن_البوت
+3. أنشئ ملف .env وضع فيه التوكنات المطلوبة.
 4. شغّل python main.py.
 
 فعّل في Discord Developer Portal الـMessage Content Intent وServer Members Intent لأن بعض الأنظمة تحتاجها.
 
 قاعدة البيانات تُنشأ تلقائياً عند تشغيل البوت، وتدعم ترقية قواعد البيانات القديمة بإضافة جداول المتجر الجديدة دون حذف البيانات السابقة.
 
+## Cloudflare Worker public URL for Roblox Monitor
 
-## Cloudflare Pages public URL for Roblox Monitor
+الريبو فيه Cloudflare Worker جاهز داخل:
 
-الريبو فيه مشروع Pages جاهز داخل:
-
-~~~text
+```text
 cloudflare/
-~~~
+```
 
-هاد المشروع كيعطيك رابط HTTPS على ~~~text
-*.pages.dev
-~~~ وكيعمل Proxy آمن نحو API ديال Roblox Monitor اللي خدامة في FeatherPanel/Quaxly.
+هاد المشروع كيعطيك رابط HTTPS مجاني على:
 
-### إعداد Pages
+```text
+*.workers.dev
+```
 
-- Cloudflare Dashboard → Workers & Pages → Create application → Pages → Import an existing Git repository.
-- Repository: ~~~text
-titanspeakermen027-netizen/Nawaf
-~~~
-- Production branch: ~~~text
-main
-~~~
-- Root directory: ~~~text
-cloudflare
-~~~
-- Framework preset: None
-- Build command: ~~~text
-exit 0
-~~~
-- Build output directory: ~~~text
-.
-~~~
+وكيعمل Proxy آمن نحو API ديال Roblox Monitor اللي خدامة في FeatherPanel/Quaxly.
 
-من بعد النشر، استعمل رابط ~~~text
-https://YOUR-PROJECT.pages.dev
-~~~ كـROBLOX_MONITOR_PUBLIC_URL.
+### إعداد Workers Builds من GitHub
 
-### Variables / Secrets في Cloudflare
+من Cloudflare Dashboard:
 
-في Pages → Settings → Variables and Secrets أضف:
+- Workers & Pages → Create application → Get started → Import a repository.
+- Repository: `titanspeakermen027-netizen/Nawaf`
+- Production branch: `main`
+- Root directory: `cloudflare`
+- Build command: فارغ
+- Deploy command: `npx wrangler deploy`
 
-~~~text
+الـWorker config موجود في:
+
+```text
+cloudflare/wrangler.jsonc
+```
+
+واسم الـWorker هو:
+
+```text
+nawaf-roblox
+```
+
+Workers Builds كيدير الـdeploy من Cloudflare، لذلك ما محتاجش Wrangler في Termux.
+
+من بعد النشر، استعمل الرابط اللي كتولده Cloudflare، مثلاً:
+
+```text
+https://nawaf-roblox.YOUR-SUBDOMAIN.workers.dev
+```
+
+كـ`ROBLOX_MONITOR_PUBLIC_URL`.
+
+### Variables / Secrets في Cloudflare Worker
+
+في Worker → Settings → Variables and Secrets أضف:
+
+```text
 ROBLOX_UPSTREAM_URL=https://YOUR-FEATHERPANEL-API.example.com
 ROBLOX_MONITOR_API_KEY=YOUR_SHARED_SECRET
-~~~
+```
 
 ما تحطش production secrets في GitHub.
 
-تفاصيل الربط كاملة موجودة في ~~~text
-cloudflare/README.md
-~~~
+### Roblox Studio Plugin
+
+بدّل:
+
+```lua
+local API_URL = "https://nawaf-roblox.YOUR-SUBDOMAIN.workers.dev/v1/errors"
+local API_KEY = "YOUR_SHARED_SECRET"
+```
+
+خاص `API_KEY` يكون نفس القيمة الموجودة في Nawaf وCloudflare.
+
