@@ -4,14 +4,30 @@
 
 local HttpService = game:GetService("HttpService")
 local LogService = game:GetService("LogService")
-local StudioService = game:GetService("StudioService")
 
 local API_URL = "https://YOUR-PUBLIC-DOMAIN.example.com/v1/errors"
 local API_KEY = "PUT_YOUR_API_KEY_HERE"
-local MAP_NAME = "YOUR MAP NAME"
+local MAP_NAME_OVERRIDE = "" -- Optional. Leave empty to detect the current Roblox place automatically.
 
 local SEND_COOLDOWN = 5
 local lastSentAt = 0
+
+local function getMapName()
+	if MAP_NAME_OVERRIDE ~= "" then
+		return MAP_NAME_OVERRIDE
+	end
+
+	local name = tostring(game.Name or "")
+	if name ~= "" then
+		return name
+	end
+
+	if game.PlaceId and game.PlaceId ~= 0 then
+		return "Roblox Place " .. tostring(game.PlaceId)
+	end
+
+	return "Unknown Roblox Map"
+end
 
 local function sendError(message, messageType)
 	if messageType ~= Enum.MessageType.MessageError then
@@ -25,14 +41,13 @@ local function sendError(message, messageType)
 	lastSentAt = now
 
 	local payload = {
-		map_name = MAP_NAME,
+		map_name = getMapName(),
 		message = tostring(message),
 		message_type = tostring(messageType),
 		source = "Roblox Studio",
 		context = "Studio Output",
 		place_id = tostring(game.PlaceId),
 		game_id = tostring(game.GameId),
-		studio_user_id = tostring(StudioService:GetUserId()),
 		timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 	}
 
