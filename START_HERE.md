@@ -15,16 +15,16 @@ Install requirements:
 pip install -r requirements.txt
 ~~~
 
-Run the normal Nawaf bot with:
+### Startup command
+
+الاستضافة تحتاج غير Startup واحد:
 
 ~~~bash
 python main.py
 ~~~
 
-Run only the standalone Roblox monitor with:
-
-~~~bash
-python roblox_monitor/bot.py
-~~~
+هذا الملف كيشغّل البوتين بجوج في نفس العملية:
+- Nawaf Discord Bot باستخدام DISCORD_TOKEN
+- Roblox Monitor باستخدام ROBLOX_MONITOR_TOKEN
 
 The database file nawaf.sqlite3 is created automatically and is ignored by git.
