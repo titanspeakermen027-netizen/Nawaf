@@ -54,3 +54,55 @@ roblox_monitor/studio_plugin.lua
 فعّل في Discord Developer Portal الـMessage Content Intent وServer Members Intent لأن بعض الأنظمة تحتاجها.
 
 قاعدة البيانات تُنشأ تلقائياً عند تشغيل البوت، وتدعم ترقية قواعد البيانات القديمة بإضافة جداول المتجر الجديدة دون حذف البيانات السابقة.
+
+
+## Cloudflare Pages public URL for Roblox Monitor
+
+الريبو فيه مشروع Pages جاهز داخل:
+
+~~~text
+cloudflare/
+~~~
+
+هاد المشروع كيعطيك رابط HTTPS على ~~~text
+*.pages.dev
+~~~ وكيعمل Proxy آمن نحو API ديال Roblox Monitor اللي خدامة في FeatherPanel/Quaxly.
+
+### إعداد Pages
+
+- Cloudflare Dashboard → Workers & Pages → Create application → Pages → Import an existing Git repository.
+- Repository: ~~~text
+titanspeakermen027-netizen/Nawaf
+~~~
+- Production branch: ~~~text
+main
+~~~
+- Root directory: ~~~text
+cloudflare
+~~~
+- Framework preset: None
+- Build command: ~~~text
+exit 0
+~~~
+- Build output directory: ~~~text
+.
+~~~
+
+من بعد النشر، استعمل رابط ~~~text
+https://YOUR-PROJECT.pages.dev
+~~~ كـROBLOX_MONITOR_PUBLIC_URL.
+
+### Variables / Secrets في Cloudflare
+
+في Pages → Settings → Variables and Secrets أضف:
+
+~~~text
+ROBLOX_UPSTREAM_URL=https://YOUR-FEATHERPANEL-API.example.com
+ROBLOX_MONITOR_API_KEY=YOUR_SHARED_SECRET
+~~~
+
+ما تحطش production secrets في GitHub.
+
+تفاصيل الربط كاملة موجودة في ~~~text
+cloudflare/README.md
+~~~
