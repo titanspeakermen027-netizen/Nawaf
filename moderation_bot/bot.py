@@ -609,6 +609,12 @@ class SecondBot(commands.Bot):
         for row in rows:
             self.add_view(TicketRatingView(self, row["channel_id"]))
 
+        try:
+            synced = await self.tree.sync()
+            print(f"[OK] تمت مزامنة {len(synced)} من أوامر Slash للبوت الثاني")
+        except discord.HTTPException as exc:
+            print(f"[ERROR] فشلت مزامنة أوامر Slash للبوت الثاني: {exc!r}")
+
 
 intents = discord.Intents.default()
 intents.members = True
@@ -1868,6 +1874,462 @@ class ModerationBot(commands.Cog):
         if command == "ratings":
             target = mentions[0] if mentions else message.author
             await self.show_ratings(message, target)
+
+
+    async def _slash_reason(self, interaction, action, target):
+        if not isinstance(interaction.user, discord.Member):
+            return False
+        ok, error = can_manage_target(interaction.guild, interaction.user, target)
+        if not ok:
+            await interaction.response.send_message(error, ephemeral=True)
+            return False
+        label = {
+            "warn": "التحذير",
+            "ban": "الحظر",
+            "kick": "الطرد",
+            "mute": "الكتم",
+            "jail": "السجن",
+        }.get(action, action)
+        await interaction.response.send_message(
+            f"اختر سبب {label} لـ {target.mention}:",
+            view=ActionReasonView(self, action, target, interaction.user.id),
+            ephemeral=True,
+        )
+        return True
+
+    @discord.app_commands.command(
+        name="warn",
+        description="إعطاء تحذير لعضو ثم اختيار السبب من قائمة"
+    )
+    @discord.app_commands.describe(member="العضو الذي سيحصل على التحذير")
+    async def slash_warn(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self._slash_reason(interaction, "warn", member)
+
+    @discord.app_commands.command(
+        name="ban",
+        description="حظر عضو مع اختيار السبب"
+    )
+    @discord.app_commands.describe(member="العضو الذي سيتم حظره")
+    async def slash_ban(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self._slash_reason(interaction, "ban", member)
+
+    @discord.app_commands.command(
+        name="kick",
+        description="طرد عضو مع اختيار السبب"
+    )
+    @discord.app_commands.describe(member="العضو الذي سيتم طرده")
+    async def slash_kick(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self._slash_reason(interaction, "kick", member)
+
+    @discord.app_commands.command(
+        name="mute",
+        description="كتم عضو مع اختيار السبب والمدة"
+    )
+    @discord.app_commands.describe(member="العضو الذي سيتم كتمه")
+    async def slash_mute(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self._slash_reason(interaction, "mute", member)
+
+    @discord.app_commands.command(
+        name="jail",
+        description="إدخال عضو إلى السجن مع اختيار السبب"
+    )
+    @discord.app_commands.describe(member="العضو الذي سيتم سجنه")
+    async def slash_jail(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self._slash_reason(interaction, "jail", member)
+
+    @discord.app_commands.command(
+        name="warnings",
+        description="عرض تحذيرات عضو"
+    )
+    @discord.app_commands.describe(member="العضو المطلوب")
+    async def slash_warnings(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self.show_warnings_to_interaction(interaction, member)
+
+    async def show_warnings_to_interaction(self, interaction, target):
+        rows = warning_rows(interaction.guild.id, target.id)
+        if not rows:
+            return await interaction.response.send_message(
+                f"✅ {target.mention} ما عندوش تحذيرات نشطة.",
+                ephemeral=True,
+            )
+        lines = [
+            f"**#{row['id']}** — {row['reason']} — <@{row['moderator_id']}>"
+            for row in rows[:10]
+        ]
+        embed = discord.Embed(
+            title=f"⚠️ تحذيرات {target.display_name}",
+            description="\n".join(lines),
+            color=discord.Color.yellow(),
+        )
+        embed.set_footer(text=f"{len(rows)}/{WARNING_LIMIT} تحذيرات نشطة")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="clear-warnings",
+        description="مسح جميع التحذيرات النشطة لعضو"
+    )
+    @discord.app_commands.describe(member="العضو المطلوب")
+    async def slash_clear_warnings(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        with connect() as con:
+            cur = con.execute(
+                "UPDATE warnings SET active=0 WHERE guild_id=? AND user_id=? AND active=1",
+                (interaction.guild.id, member.id),
+            )
+            count = cur.rowcount
+        await interaction.response.send_message(
+            f"✅ تم مسح **{count}** تحذيرات عن {member.mention}.",
+            ephemeral=True,
+        )
+
+    @discord.app_commands.command(
+        name="remove-warning",
+        description="إلغاء آخر تحذير نشط لعضو"
+    )
+    @discord.app_commands.describe(member="العضو المطلوب")
+    async def slash_remove_warning(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        with connect() as con:
+            row = con.execute(
+                """
+                SELECT id FROM warnings
+                WHERE guild_id=? AND user_id=? AND active=1
+                ORDER BY id DESC LIMIT 1
+                """,
+                (interaction.guild.id, member.id),
+            ).fetchone()
+            if not row:
+                return await interaction.response.send_message(
+                    "❌ ما عندوش تحذيرات نشطة.",
+                    ephemeral=True,
+                )
+            con.execute("UPDATE warnings SET active=0 WHERE id=?", (row["id"],))
+        await interaction.response.send_message(
+            f"✅ تم إلغاء آخر تحذير عن {member.mention}.",
+            ephemeral=True,
+        )
+
+    @discord.app_commands.command(
+        name="unmute",
+        description="فك الكتم عن عضو"
+    )
+    @discord.app_commands.describe(member="العضو المطلوب")
+    async def slash_unmute(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.moderate_members:
+            return await interaction.response.send_message(
+                "❌ البوت ما عندوش Moderate Members.",
+                ephemeral=True,
+            )
+        ok, error = can_manage_target(interaction.guild, interaction.user, member)
+        if not ok:
+            return await interaction.response.send_message(error, ephemeral=True)
+        try:
+            await member.timeout(None, reason=f"Unmute by {interaction.user}")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ Discord رفض فك الكتم بسبب الصلاحيات أو ترتيب الرتب.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ تعذر فك الكتم.", ephemeral=True)
+        await interaction.response.send_message(f"✅ تم فك الكتم عن {member.mention}.")
+
+    @discord.app_commands.command(
+        name="unjail",
+        description="إخراج عضو من السجن وإرجاع رتبته السابقة"
+    )
+    @discord.app_commands.describe(member="العضو المطلوب")
+    async def slash_unjail(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self.unjail_from_message(
+            await self._message_proxy(interaction),
+            member,
+        )
+
+    async def _message_proxy(self, interaction):
+        return InteractionMessageProxy(interaction)
+
+    @discord.app_commands.command(
+        name="send",
+        description="إرسال رسالة إلى روم محدد"
+    )
+    @discord.app_commands.describe(channel="الروم المستهدفة", message="النص المراد إرساله")
+    async def slash_send(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        if not channel.permissions_for(interaction.guild.me).send_messages:
+            return await interaction.response.send_message(
+                "❌ البوت ما عندوش صلاحية إرسال في هاد الروم.",
+                ephemeral=True,
+            )
+        try:
+            await channel.send(message)
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ Discord رفض الإرسال.", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ وقع خطأ أثناء الإرسال.", ephemeral=True)
+        await interaction.response.send_message(f"✅ تم إرسال الرسالة في {channel.mention}.", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="dm",
+        description="إرسال رسالة خاصة إلى عضو محدد"
+    )
+    @discord.app_commands.describe(member="العضو المستهدف", message="الرسالة الخاصة")
+    async def slash_dm(self, interaction: discord.Interaction, member: discord.Member, message: str):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        try:
+            await member.send(
+                f"رسالة من إدارة سيرفر **{interaction.guild.name}**:\n{message}"
+            )
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ العضو مانع الرسائل الخاصة أو Discord رفض الإرسال.",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ تعذر إرسال الرسالة الخاصة.", ephemeral=True)
+        await interaction.response.send_message(f"✅ تم إرسال DM إلى {member.mention}.", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="mass-dm",
+        description="إرسال DM لجميع الأعضاء بعد تأكيد"
+    )
+    @discord.app_commands.describe(message="الرسالة التي ستصل للأعضاء")
+    async def slash_mass_dm(self, interaction: discord.Interaction, message: str):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await interaction.response.send_message(
+            (
+                "⚠️ هذا الإجراء سيرسل DM لجميع أعضاء السيرفر غير البوتات.\n"
+                f"الرسالة: {message}\n\n"
+                "أكد العملية من الزر التالي."
+            ),
+            view=MassDMConfirmView(self, interaction.user.id, message),
+            ephemeral=True,
+        )
+
+    @discord.app_commands.command(
+        name="ticket-panel",
+        description="إرسال بانل التذاكر في الروم الحالية"
+    )
+    async def slash_ticket_panel(self, interaction: discord.Interaction):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        if not isinstance(interaction.channel, discord.TextChannel):
+            return await interaction.response.send_message("❌ استعمل الأمر داخل روم نصية.", ephemeral=True)
+        await interaction.response.send_message(
+            "✅ جاري تجهيز بانل التذاكر...",
+            ephemeral=True,
+        )
+        await self.create_ticket_panel_message(
+            interaction.guild,
+            interaction.channel,
+        )
+
+    async def create_ticket_panel_message(self, guild, channel):
+        embed = discord.Embed(
+            title="🎫 الدعم والتذاكر",
+            description="اضغط على **فتح تذكرة** لفتح روم خاصة مع الإدارة.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        sent = await channel.send(embed=embed, view=TicketPanelView(self))
+        set_setting(
+            guild.id,
+            ticket_panel_channel_id=channel.id,
+            ticket_panel_message_id=sent.id,
+        )
+
+    @discord.app_commands.command(
+        name="set-log",
+        description="تعيين روم لوق الإدارة"
+    )
+    @discord.app_commands.describe(channel="روم اللوق")
+    async def slash_set_log(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ هذا الإعداد لصاحب السيرفر أو Administrator فقط.", ephemeral=True)
+        set_setting(interaction.guild.id, mod_log_channel_id=channel.id)
+        await interaction.response.send_message(f"✅ تم تعيين {channel.mention} كلوق للإدارة.", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="set-ticket",
+        description="تعيين تصنيف التذاكر"
+    )
+    @discord.app_commands.describe(category="تصنيف التذاكر")
+    async def slash_set_ticket(self, interaction: discord.Interaction, category: discord.CategoryChannel):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ هذا الإعداد للـAdministrator فقط.", ephemeral=True)
+        set_setting(interaction.guild.id, ticket_category_id=category.id)
+        await interaction.response.send_message(f"✅ تم تعيين تصنيف التذاكر: **{category.name}**.", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="set-jail",
+        description="تعيين رتبة السجن وروم السجن"
+    )
+    @discord.app_commands.describe(role="رتبة السجن", channel="روم السجن الاختيارية")
+    async def slash_set_jail(self, interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel | None = None):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ هذا الإعداد للـAdministrator فقط.", ephemeral=True)
+        if role.is_default() or role.managed:
+            return await interaction.response.send_message("❌ اختر رتبة عادية قابلة للإدارة.", ephemeral=True)
+        if interaction.guild.me and role >= interaction.guild.me.top_role:
+            return await interaction.response.send_message("❌ رتبة السجن خاصها تكون تحت رتبة البوت.", ephemeral=True)
+        set_setting(
+            interaction.guild.id,
+            jail_role_id=role.id,
+            jail_channel_id=channel.id if channel else None,
+        )
+        text = f"✅ رتبة السجن: {role.mention}"
+        if channel:
+            text += f" | روم السجن: {channel.mention}"
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="lock",
+        description="قفل روم أمام الأعضاء"
+    )
+    @discord.app_commands.describe(channel="الروم المستهدفة، تقدر تخليها فارغة للروم الحالية")
+    async def slash_lock(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        target_channel = channel or interaction.channel
+        if not isinstance(target_channel, discord.TextChannel):
+            return await interaction.response.send_message("❌ الروم غير صالحة.", ephemeral=True)
+        overwrite = target_channel.overwrites_for(interaction.guild.default_role)
+        overwrite.send_messages = False
+        try:
+            await target_channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrite,
+                reason=f"Lock by {interaction.user}",
+            )
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ البوت ما عندوش Manage Channels.", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ تعذر قفل الروم.", ephemeral=True)
+        await interaction.response.send_message(f"🔒 تم قفل {target_channel.mention}.")
+
+    @discord.app_commands.command(
+        name="unlock",
+        description="فتح روم للأعضاء"
+    )
+    @discord.app_commands.describe(channel="الروم المستهدفة، تقدر تخليها فارغة للروم الحالية")
+    async def slash_unlock(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        target_channel = channel or interaction.channel
+        if not isinstance(target_channel, discord.TextChannel):
+            return await interaction.response.send_message("❌ الروم غير صالحة.", ephemeral=True)
+        overwrite = target_channel.overwrites_for(interaction.guild.default_role)
+        overwrite.send_messages = None
+        try:
+            await target_channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrite,
+                reason=f"Unlock by {interaction.user}",
+            )
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ البوت ما عندوش Manage Channels.", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ تعذر فتح الروم.", ephemeral=True)
+        await interaction.response.send_message(f"🔓 تم فتح {target_channel.mention}.")
+
+    @discord.app_commands.command(
+        name="purge",
+        description="حذف عدد من الرسائل"
+    )
+    @discord.app_commands.describe(amount="عدد الرسائل من 1 إلى 100")
+    async def slash_purge(self, interaction: discord.Interaction, amount: discord.app_commands.Range[int, 1, 100]):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        try:
+            deleted = await interaction.channel.purge(limit=int(amount))
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ البوت ما عندوش Manage Messages.", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("❌ تعذر حذف الرسائل.", ephemeral=True)
+        await interaction.response.send_message(f"🧹 تم حذف **{len(deleted)}** رسالة.", ephemeral=True)
+
+    @discord.app_commands.command(
+        name="rate",
+        description="إرسال لوحة تقييم لموظف"
+    )
+    @discord.app_commands.describe(member="الموظف الذي سيحصل على التقييم")
+    async def slash_rate(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await interaction.response.send_message(
+            f"اختر تقييمك لـ {member.mention}:",
+            view=RatingView(self, member.id, interaction.user.id),
+            ephemeral=True,
+        )
+
+    @discord.app_commands.command(
+        name="ratings",
+        description="عرض تقييمات موظف"
+    )
+    @discord.app_commands.describe(member="الموظف المطلوب")
+    async def slash_ratings(self, interaction: discord.Interaction, member: discord.Member):
+        if not is_manager(interaction.user):
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await self.show_ratings_to_interaction(interaction, member)
+
+    async def show_ratings_to_interaction(self, interaction, target):
+        with connect() as con:
+            rows = con.execute(
+                """
+                SELECT rating, note, rater_id, created_at
+                FROM ratings
+                WHERE guild_id=? AND target_id=?
+                ORDER BY id DESC LIMIT 10
+                """,
+                (interaction.guild.id, target.id),
+            ).fetchall()
+            avg_row = con.execute(
+                """
+                SELECT AVG(rating) AS average, COUNT(*) AS count
+                FROM ratings
+                WHERE guild_id=? AND target_id=?
+                """,
+                (interaction.guild.id, target.id),
+            ).fetchone()
+
+        if not rows:
+            return await interaction.response.send_message(
+                f"⭐ ما كايناش تقييمات مسجلة لـ {target.mention}.",
+                ephemeral=True,
+            )
+
+        average = float(avg_row["average"] or 0)
+        lines = [
+            f"⭐ **{row['rating']}/5** — {row['note'] or 'بدون ملاحظة'} — <@{row['rater_id']}>"
+            for row in rows
+        ]
+        embed = discord.Embed(
+            title=f"⭐ تقييمات {target.display_name}",
+            description="\n".join(lines),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text=f"المتوسط: {average:.2f}/5 | الإجمالي: {avg_row['count']}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message):
