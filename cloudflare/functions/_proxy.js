@@ -89,9 +89,13 @@ export async function proxyToUpstream(request, env, pathname) {
     return json({ ok: false, error: "method_not_allowed" }, 405);
   }
 
-  const suppliedKey = request.headers.get("X-API-Key") || "";
-  if (suppliedKey !== config.apiKey) {
-    return unauthorized();
+  // Health is intentionally public so the Pages URL can be checked in a browser.
+  // The error ingestion endpoint remains protected by the shared API key.
+  if (pathname !== "/health") {
+    const suppliedKey = request.headers.get("X-API-Key") || "";
+    if (suppliedKey !== config.apiKey) {
+      return unauthorized();
+    }
   }
 
   const upstreamUrl = buildUpstreamUrl(config.upstream, pathname);
