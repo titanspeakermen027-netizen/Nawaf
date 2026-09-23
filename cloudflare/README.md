@@ -30,7 +30,8 @@ Workers & Pages → مشروع Pages → Settings → Variables and Secrets
 6. Build command: exit 0
 7. Build output directory: .
 8. دير Save and Deploy.
-9. من بعد النشر، Cloudflare غيعطيك رابط بحال:
+9. من بعد أول Deploy، دخل إلى Settings → Functions → Compatibility Flags، وفَعّل allow_custom_ports في Production وPreview إلا كان ROBLOX_UPSTREAM_URL فيه port مخصص مثل 25543.
+10. من بعد إعادة النشر، Cloudflare غيعطيك رابط بحال:
    https://YOUR-PROJECT.pages.dev
 
 ## Nawaf .env
@@ -64,4 +65,4 @@ local MAP_NAME = "YOUR MAP NAME"
 
 إلا /health عطاك upstream_unreachable، فالمشكل غالباً في الرابط أو الـport ديال FeatherPanel، ماشي في pages.dev.
 
-Cloudflare Pages Functions كتخدم من مجلد functions، وهي اللي كتخلق routes بحال /health و/v1/errors.
+Cloudflare Pages Functions كتخدم من مجلد functions، وهي اللي كتخلق routes بحال /health و/v1/errors. Cloudflare توثق أن allow_custom_ports يسمح للـfetch داخل Worker باستعمال port مخصص؛ أما إذا كان الـupstream نفسه وراء Cloudflare Proxy فالأمر كيخضع للـports المدعومة من Cloudflare.
