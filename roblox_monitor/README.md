@@ -66,10 +66,22 @@ Change:
 ~~~lua
 local API_URL = "https://YOUR-PUBLIC-DOMAIN.example.com/v1/errors"
 local API_KEY = "PUT_YOUR_API_KEY_HERE"
-local MAP_NAME = "YOUR MAP NAME"
+local MAP_NAME_OVERRIDE = "" -- Optional
 ~~~
 
 The API URL must point to the public HTTPS URL of the monitor /v1/errors endpoint.
+
+### Automatic map detection
+
+The plugin automatically sends the current Roblox place name from `game.Name`, together with `PlaceId` and `GameId`. The Discord monitor reads these values from the request payload and displays them in the error Embed.
+
+That means you do not need to configure the map name manually for every place. To force a custom name, set:
+
+~~~lua
+local MAP_NAME_OVERRIDE = "My Map Name"
+~~~
+
+Leave it empty to keep automatic detection.
 
 Roblox Studio plugin HTTP requests may require a permission prompt the first time the plugin communicates with the address.
 
