@@ -196,7 +196,7 @@ async def send_error_embed(payload: dict[str, Any]) -> tuple[bool, bool]:
 
     embed = discord.Embed(
         title="Roblox Map Error Detected",
-        description=f"~~~text\n{message}\n~~~",
+        description=message,
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="Map", value=map_name, inline=True)
