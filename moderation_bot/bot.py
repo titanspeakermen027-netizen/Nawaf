@@ -614,13 +614,6 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-bot = SecondBot(
-    command_prefix=PREFIX,
-    intents=intents,
-    case_insensitive=True,
-)
-
-
 class ModerationBot(commands.Cog):
     def __init__(self, bot_instance: SecondBot):
         self.bot = bot_instance
@@ -1884,9 +1877,8 @@ class ModerationBot(commands.Cog):
 async def start():
     token = os.getenv("MODERATION_BOT_TOKEN")
     if not token:
-        raise RuntimeError(
-            "MODERATION_BOT_TOKEN is missing from .env"
-        )
+        print("[WARN] MODERATION_BOT_TOKEN is missing; second moderation bot is disabled.")
+        return
 
     intents = discord.Intents.default()
     intents.members = True
