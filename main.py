@@ -1,9 +1,13 @@
 import os
 import asyncio
+
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+
 from database import init_db
+import roblox_monitor.bot as roblox_monitor
+
 
 load_dotenv()
 
@@ -83,14 +87,24 @@ async def test(interaction: discord.Interaction):
     await interaction.response.send_message("✅ تعمل أوامر Slash الخاصة بـNawaf بشكل صحيح!", ephemeral=True)
 
 
-async def main():
+async def start_nawaf():
     init_db()
     await load_cogs()
+
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_TOKEN is missing from .env")
+
     async with bot:
         await bot.start(token)
+
+
+async def main():
+    # One startup command runs both independent Discord clients.
+    await asyncio.gather(
+        start_nawaf(),
+        roblox_monitor.run(),
+    )
 
 
 if __name__ == "__main__":
