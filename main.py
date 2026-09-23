@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from database import init_db
 import roblox_monitor.bot as roblox_monitor
+import moderation_bot.bot as moderation_bot
 
 
 load_dotenv()
@@ -100,10 +101,11 @@ async def start_nawaf():
 
 
 async def main():
-    # One startup command runs both independent Discord clients.
+    # One startup command runs all independent Discord clients.
     await asyncio.gather(
         start_nawaf(),
         roblox_monitor.run(),
+        moderation_bot.run(),
     )
 
 
