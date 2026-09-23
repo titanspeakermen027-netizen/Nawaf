@@ -28,16 +28,12 @@
 
 الريبو يحتوي أيضاً على خدمة مستقلة لمراقبة أخطاء خرائط Roblox Studio. الخدمة لها توكن Discord منفصل عن Nawaf، وتستقبل أخطاء Studio عبر API ثم ترسلها إلى روم Discord محدد.
 
-شغّل Nawaf العادي:
+### Startup واحد للاستضافة
+
+ما تحتاجش تشغّل جوج ملفات. الملف الرئيسي `main.py` كيشغّل **Nawaf + Roblox Monitor معاً في نفس العملية**، مع توكنين مستقلين:
 
 ~~~bash
 python main.py
-~~~
-
-وشغّل مراقب Roblox بشكل مستقل:
-
-~~~bash
-python roblox_monitor/bot.py
 ~~~
 
 تفاصيل إعداد API وStudio Plugin موجودة في:
