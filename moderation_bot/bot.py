@@ -40,6 +40,7 @@ def init_db() -> None:
                 ticket_panel_channel_id INTEGER,
                 ticket_panel_message_id INTEGER,
                 mod_log_channel_id INTEGER,
+                warning_log_channel_id INTEGER,
                 jail_role_id INTEGER,
                 jail_channel_id INTEGER
             );
@@ -89,6 +90,17 @@ def init_db() -> None:
             """
         )
 
+    # Migrate existing databases created before the dedicated warning log.
+    with connect() as con:
+        columns = {
+            row["name"]
+            for row in con.execute("PRAGMA table_info(guild_settings)").fetchall()
+        }
+        if "warning_log_channel_id" not in columns:
+            con.execute(
+                "ALTER TABLE guild_settings ADD COLUMN warning_log_channel_id INTEGER"
+            )
+
 
 def ensure_guild(guild_id: int) -> None:
     with connect() as con:
@@ -115,6 +127,7 @@ def set_setting(guild_id: int, **values) -> None:
         "ticket_panel_channel_id",
         "ticket_panel_message_id",
         "mod_log_channel_id",
+        "warning_log_channel_id",
         "jail_role_id",
         "jail_channel_id",
     }
@@ -165,9 +178,39 @@ def reason_options():
     ]
 
 
+async def respond(
+    interaction: discord.Interaction,
+    content: str | None = None,
+    *,
+    embed: discord.Embed | None = None,
+    view: discord.ui.View | None = None,
+    ephemeral: bool = False,
+):
+    kwargs = {"content": content, "ephemeral": ephemeral}
+    if embed is not None:
+        kwargs["embed"] = embed
+    if view is not None:
+        kwargs["view"] = view
+
+    if interaction.response.is_done():
+        return await interaction.followup.send(**kwargs)
+    return await interaction.response.send_message(**kwargs)
+
+
 async def send_mod_log(guild: discord.Guild, embed: discord.Embed) -> None:
     settings = get_settings(guild.id)
     channel_id = settings["mod_log_channel_id"]
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel:
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+
+async def send_warning_log(guild: discord.Guild, embed: discord.Embed) -> None:
+    settings = get_settings(guild.id)
+    channel_id = settings["warning_log_channel_id"] or settings["mod_log_channel_id"]
     channel = guild.get_channel(channel_id) if channel_id else None
     if channel:
         try:
@@ -253,11 +296,19 @@ async def ensure_jail_role(guild: discord.Guild) -> discord.Role:
 
 
 class ActionReasonSelect(discord.ui.Select):
-    def __init__(self, cog, action: str, target: discord.Member, author_id: int):
+    def __init__(
+        self,
+        cog,
+        action: str,
+        target: discord.Member,
+        author_id: int,
+        ephemeral_result: bool = False,
+    ):
         self.cog = cog
         self.action = action
         self.target = target
         self.author_id = author_id
+        self.ephemeral_result = ephemeral_result
         options = [
             discord.SelectOption(label=label[:100], description=desc[:100], value=str(index))
             for index, (label, desc) in enumerate(reason_options())
@@ -284,6 +335,7 @@ class ActionReasonSelect(discord.ui.Select):
                     self.action,
                     self.target,
                     self.author_id,
+                    self.ephemeral_result,
                 )
             )
 
@@ -296,6 +348,7 @@ class ActionReasonSelect(discord.ui.Select):
                     self.target,
                     self.author_id,
                     label,
+                    self.ephemeral_result,
                 ),
                 ephemeral=True,
             )
@@ -308,10 +361,13 @@ class ActionReasonSelect(discord.ui.Select):
                     self.target,
                     self.author_id,
                     label,
+                    self.ephemeral_result,
                 ),
                 ephemeral=True,
             )
 
+        # Discord requires an initial interaction acknowledgement quickly.
+        await interaction.response.defer(ephemeral=self.ephemeral_result)
         await self.cog.execute_action(
             interaction,
             self.action,
@@ -321,9 +377,24 @@ class ActionReasonSelect(discord.ui.Select):
 
 
 class ActionReasonView(discord.ui.View):
-    def __init__(self, cog, action: str, target: discord.Member, author_id: int):
+    def __init__(
+        self,
+        cog,
+        action: str,
+        target: discord.Member,
+        author_id: int,
+        ephemeral_result: bool = False,
+    ):
         super().__init__(timeout=180)
-        self.add_item(ActionReasonSelect(cog, action, target, author_id))
+        self.add_item(
+            ActionReasonSelect(
+                cog,
+                action,
+                target,
+                author_id,
+                ephemeral_result,
+            )
+        )
 
 
 class CustomReasonModal(discord.ui.Modal, title="اكتب سبب الإجراء"):
@@ -334,16 +405,18 @@ class CustomReasonModal(discord.ui.Modal, title="اكتب سبب الإجراء"
         max_length=500,
     )
 
-    def __init__(self, cog, action, target, author_id):
+    def __init__(self, cog, action, target, author_id, ephemeral_result=False):
         super().__init__(title="اكتب سبب الإجراء")
         self.cog = cog
         self.action = action
         self.target = target
         self.author_id = author_id
+        self.ephemeral_result = ephemeral_result
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("❌ غير مسموح.", ephemeral=True)
+        await interaction.response.defer(ephemeral=self.ephemeral_result)
         await self.cog.execute_action(
             interaction,
             self.action,
@@ -353,11 +426,12 @@ class CustomReasonModal(discord.ui.Modal, title="اكتب سبب الإجراء"
 
 
 class RelatedUserSelect(discord.ui.UserSelect):
-    def __init__(self, cog, target, author_id, related_type):
+    def __init__(self, cog, target, author_id, related_type, ephemeral_result=False):
         self.cog = cog
         self.target = target
         self.author_id = author_id
         self.related_type = related_type
+        self.ephemeral_result = ephemeral_result
         super().__init__(
             placeholder="اختر الشخص المتضرر من القائمة",
             min_values=1,
@@ -383,6 +457,7 @@ class RelatedUserSelect(discord.ui.UserSelect):
                 )
 
         reason = f"{self.related_type} — المتضرر: {selected.mention}"
+        await interaction.response.defer(ephemeral=self.ephemeral_result)
         await self.cog.apply_warning(
             interaction,
             self.target,
@@ -393,17 +468,34 @@ class RelatedUserSelect(discord.ui.UserSelect):
 
 
 class RelatedUserView(discord.ui.View):
-    def __init__(self, cog, action, target, author_id, related_type):
+    def __init__(
+        self,
+        cog,
+        action,
+        target,
+        author_id,
+        related_type,
+        ephemeral_result=False,
+    ):
         super().__init__(timeout=180)
-        self.add_item(RelatedUserSelect(cog, target, author_id, related_type))
+        self.add_item(
+            RelatedUserSelect(
+                cog,
+                target,
+                author_id,
+                related_type,
+                ephemeral_result,
+            )
+        )
 
 
 class DurationSelect(discord.ui.Select):
-    def __init__(self, cog, target, author_id, reason):
+    def __init__(self, cog, target, author_id, reason, ephemeral_result=False):
         self.cog = cog
         self.target = target
         self.author_id = author_id
         self.reason = reason
+        self.ephemeral_result = ephemeral_result
         options = [
             ("10 دقائق", "10m"),
             ("30 دقيقة", "30m"),
@@ -424,6 +516,7 @@ class DurationSelect(discord.ui.Select):
             return await interaction.response.send_message("❌ غير مسموح.", ephemeral=True)
 
         duration = parse_duration(self.values[0])
+        await interaction.response.defer(ephemeral=self.ephemeral_result)
         await self.cog.execute_mute(
             interaction,
             self.target,
@@ -434,9 +527,17 @@ class DurationSelect(discord.ui.Select):
 
 
 class DurationView(discord.ui.View):
-    def __init__(self, cog, target, author_id, reason):
+    def __init__(self, cog, target, author_id, reason, ephemeral_result=False):
         super().__init__(timeout=180)
-        self.add_item(DurationSelect(cog, target, author_id, reason))
+        self.add_item(
+            DurationSelect(
+                cog,
+                target,
+                author_id,
+                reason,
+                ephemeral_result,
+            )
+        )
 
 
 class TicketPanelView(discord.ui.View):
@@ -635,7 +736,7 @@ class ModerationBot(commands.Cog):
         actor = interaction.user
 
         if not guild or not isinstance(actor, discord.Member):
-            return await interaction.response.send_message(
+            return await respond(interaction, 
                 "❌ الأمر خاص بالسيرفر.",
                 ephemeral=True,
             )
@@ -643,24 +744,24 @@ class ModerationBot(commands.Cog):
         if action == "warn":
             ok, error = can_manage_target(guild, actor, target)
             if not ok:
-                return await interaction.response.send_message(error, ephemeral=True)
+                return await respond(interaction, error, ephemeral=True)
             await self.apply_warning(interaction, target, reason)
             return
 
         ok, error = can_manage_target(guild, actor, target)
         if not ok:
-            return await interaction.response.send_message(error, ephemeral=True)
+            return await respond(interaction, error, ephemeral=True)
 
         try:
             if action == "ban":
                 if not guild.me or not guild.me.guild_permissions.ban_members:
-                    return await interaction.response.send_message(
+                    return await respond(interaction, 
                         "❌ البوت ما عندوش صلاحية Ban Members.",
                         ephemeral=True,
                     )
                 await target.ban(reason=reason, delete_message_seconds=0)
                 text = f"🔨 تم حظر {target.mention}. السبب: **{reason}**"
-                await interaction.response.send_message(text)
+                await respond(interaction, text)
                 await send_mod_log(
                     guild,
                     discord.Embed(
@@ -677,13 +778,13 @@ class ModerationBot(commands.Cog):
 
             if action == "kick":
                 if not guild.me or not guild.me.guild_permissions.kick_members:
-                    return await interaction.response.send_message(
+                    return await respond(interaction, 
                         "❌ البوت ما عندوش صلاحية Kick Members.",
                         ephemeral=True,
                     )
                 await target.kick(reason=reason)
                 text = f"👢 تم طرد {target.mention}. السبب: **{reason}**"
-                await interaction.response.send_message(text)
+                await respond(interaction, text)
                 await send_mod_log(
                     guild,
                     discord.Embed(
@@ -700,30 +801,30 @@ class ModerationBot(commands.Cog):
 
             if action == "jail":
                 if not guild.me or not guild.me.guild_permissions.manage_roles:
-                    return await interaction.response.send_message(
+                    return await respond(interaction, 
                         "❌ البوت ما عندوش Manage Roles.",
                         ephemeral=True,
                     )
                 await self.jail_member(guild, target, actor, reason)
-                await interaction.response.send_message(
+                await respond(interaction, 
                     f"🔒 تم إدخال {target.mention} إلى السجن. السبب: **{reason}**"
                 )
                 return
 
-            await interaction.response.send_message("❌ إجراء غير معروف.", ephemeral=True)
+            await respond(interaction, "❌ إجراء غير معروف.", ephemeral=True)
 
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await respond(interaction, 
                 "❌ Discord رفض العملية. تأكد من الصلاحيات وترتيب الرتب.",
                 ephemeral=True,
             )
         except discord.HTTPException:
-            await interaction.response.send_message(
+            await respond(interaction, 
                 "❌ وقع خطأ من Discord أثناء تنفيذ العملية.",
                 ephemeral=True,
             )
         except RuntimeError as exc:
-            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            await respond(interaction, f"❌ {exc}", ephemeral=True)
 
     async def execute_mute(
         self,
@@ -737,24 +838,24 @@ class ModerationBot(commands.Cog):
         actor = interaction.user
 
         if not guild or not isinstance(actor, discord.Member):
-            return await interaction.response.send_message(
+            return await respond(interaction, 
                 "❌ الأمر خاص بالسيرفر.",
                 ephemeral=True,
             )
 
         ok, error = can_manage_target(guild, actor, target)
         if not ok:
-            return await interaction.response.send_message(error, ephemeral=True)
+            return await respond(interaction, error, ephemeral=True)
 
         if not guild.me or not guild.me.guild_permissions.moderate_members:
-            return await interaction.response.send_message(
+            return await respond(interaction, 
                 "❌ البوت ما عندوش Moderate Members.",
                 ephemeral=True,
             )
 
         try:
             await target.timeout(duration, reason=reason)
-            await interaction.response.send_message(
+            await respond(interaction, 
                 f"🔇 تم كتم {target.mention} لمدة **{label}**. السبب: **{reason}**"
             )
             await send_mod_log(
@@ -775,12 +876,12 @@ class ModerationBot(commands.Cog):
                 f"تم كتمك في سيرفر {guild.name} لمدة {label}.\nالسبب: {reason}",
             )
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await respond(interaction, 
                 "❌ Discord رفض الكتم. تأكد من صلاحية Moderate Members وترتيب الرتب.",
                 ephemeral=True,
             )
         except discord.HTTPException:
-            await interaction.response.send_message(
+            await respond(interaction, 
                 "❌ وقع خطأ من Discord أثناء الكتم.",
                 ephemeral=True,
             )
@@ -817,7 +918,7 @@ class ModerationBot(commands.Cog):
                     ),
                 )
         except sqlite3.Error:
-            return await interaction.response.send_message(
+            return await respond(interaction, 
                 "❌ تعذر حفظ التحذير.",
                 ephemeral=True,
             )
@@ -838,7 +939,7 @@ class ModerationBot(commands.Cog):
                 "تم إدخاله السجن تلقائياً."
             )
 
-        await send_mod_log(
+        await send_warning_log(
             guild,
             discord.Embed(
                 title="⚠️ تحذير جديد",
@@ -873,11 +974,11 @@ class ModerationBot(commands.Cog):
                     f"بلوغ {WARNING_LIMIT} تحذيرات",
                 )
             except (discord.Forbidden, discord.HTTPException, RuntimeError) as exc:
-                return await interaction.response.send_message(
+                return await respond(interaction, 
                     f"{text}\n⚠️ تعذر تنفيذ السجن تلقائياً: {exc}",
                 )
 
-        await interaction.response.send_message(text)
+        await respond(interaction, text)
 
     async def jail_member(
         self,
@@ -1593,6 +1694,8 @@ class ModerationBot(commands.Cog):
             "تكت": "ticketpanel",
             "اعداد_لوق": "setlog",
             "إعداد_لوق": "setlog",
+            "اعداد_تحذيرات": "setwarninglog",
+            "إعداد_تحذيرات": "setwarninglog",
             "اعداد_السجن": "setjail",
             "إعداد_السجن": "setjail",
             "اعداد_تكت": "setticket",
@@ -1639,6 +1742,7 @@ class ModerationBot(commands.Cog):
                     command,
                     target,
                     message.author.id,
+                    ephemeral_result=False,
                 ),
             )
 
@@ -1779,6 +1883,25 @@ class ModerationBot(commands.Cog):
             await self.create_ticket_panel(message)
             return
 
+        if command == "setwarninglog":
+            if not message.author.guild_permissions.administrator:
+                return await message.reply(
+                    "❌ هذا الإعداد لصاحب السيرفر أو Administrator فقط."
+                )
+            channel = (
+                channel_mentions[0]
+                if channel_mentions
+                else message.channel
+            )
+            set_setting(
+                message.guild.id,
+                warning_log_channel_id=channel.id,
+            )
+            await message.reply(
+                f"✅ تم تعيين {channel.mention} كسجل خاص بالتحذيرات."
+            )
+            return
+
         if command == "setlog":
             channel = (
                 channel_mentions[0]
@@ -1895,7 +2018,13 @@ class ModerationBot(commands.Cog):
         }.get(action, action)
         await interaction.response.send_message(
             f"اختر سبب {label} لـ {target.mention}:",
-            view=ActionReasonView(self, action, target, interaction.user.id),
+            view=ActionReasonView(
+                self,
+                action,
+                target,
+                interaction.user.id,
+                ephemeral_result=True,
+            ),
             ephemeral=True,
         )
         return True
@@ -2193,6 +2322,30 @@ class ModerationBot(commands.Cog):
             guild.id,
             ticket_panel_channel_id=channel.id,
             ticket_panel_message_id=sent.id,
+        )
+
+    @discord.app_commands.command(
+        name="set-warning-log",
+        description="تعيين روم مخصصة لسجل التحذيرات"
+    )
+    @discord.app_commands.describe(channel="الروم التي سيستقبل فيها البوت سجل التحذيرات")
+    async def slash_set_warning_log(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+    ):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ هذا الإعداد لصاحب السيرفر أو Administrator فقط.",
+                ephemeral=True,
+            )
+        set_setting(
+            interaction.guild.id,
+            warning_log_channel_id=channel.id,
+        )
+        await interaction.response.send_message(
+            f"✅ تم تعيين {channel.mention} كسجل خاص بالتحذيرات.",
+            ephemeral=True,
         )
 
     @discord.app_commands.command(
