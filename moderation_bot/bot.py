@@ -972,7 +972,8 @@ class ModerationBot(commands.Cog):
         guild = interaction.guild
         actor = interaction.user
 
-        try:            with connect() as con:
+        try:
+            with connect() as con:
                 con.execute(
                     """
                     INSERT INTO warnings(
