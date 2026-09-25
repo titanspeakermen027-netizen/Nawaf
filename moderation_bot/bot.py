@@ -2368,7 +2368,8 @@ class ModerationBot(commands.Cog):
     @discord.app_commands.describe(message="الرسالة التي ستصل للأعضاء")
     async def slash_mass_dm(self, interaction: discord.Interaction, message: str):
         if not is_manager(interaction.user):
-            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)        await interaction.response.send_message(
+            return await interaction.response.send_message("❌ هذا الأمر للإدارة فقط.", ephemeral=True)
+        await interaction.response.send_message(
             (
                 "⚠️ هذا الإجراء سيرسل DM لجميع أعضاء السيرفر غير البوتات.\n"
                 f"الرسالة: {message}\n\n"
