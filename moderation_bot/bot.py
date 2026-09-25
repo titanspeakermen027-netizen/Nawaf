@@ -2708,7 +2708,8 @@ async def start():
     )
 
     await instance.add_cog(ModerationBot(instance))
-
+    from .bank import Bank
+    await instance.add_cog(Bank(instance))
     try:
         await instance.start(token)
     finally:
